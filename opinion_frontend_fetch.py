@@ -4,10 +4,12 @@ import json
 import os
 import random
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, Tuple, List, Iterable, Sequence
 
 import requests
+from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
 
 TOPIC_API_URL = "https://proxy.opinion.trade:8443/api/bsc/api/v2/topic"
@@ -23,6 +25,8 @@ DEFAULT_USER_AGENT = (
     "Chrome/143.0.0.0 Safari/537.36"
 )
 DEFAULT_TIMEOUT = (6, 20)
+DEFAULT_HTTP_RETRIES = 4
+DEFAULT_HTTP_BACKOFF = 0.6
 DEFAULT_OUTPUT = "opinion_topics_cache.json"
 DEFAULT_MERGED_OUTPUT = "opinion_topics_merged.json"
 DEFAULT_DEPTH_OUTPUT = "opinion_depth_cache.json"
@@ -36,6 +40,105 @@ TOTAL_KEYS = (
     "totalElements",
     "total_elements",
 )
+
+
+_tls = threading.local()
+
+
+def _build_session() -> requests.Session:
+    s = requests.Session()
+    adapter = HTTPAdapter(
+        max_retries=0,
+        pool_connections=64,
+        pool_maxsize=64,
+    )
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+def _get_session(name: str) -> requests.Session:
+    sess = getattr(_tls, name, None)
+    if sess is None:
+        sess = _build_session()
+        setattr(_tls, name, sess)
+    return sess
+
+
+def _request_with_retry(
+    method: str,
+    url: str,
+    *,
+    session: requests.Session,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    timeout=DEFAULT_TIMEOUT,
+    tries: int = DEFAULT_HTTP_RETRIES,
+) -> requests.Response:
+    last_err: Optional[Exception] = None
+    retryable = {429, 500, 502, 503, 504}
+
+    for attempt in range(max(1, tries)):
+        try:
+            resp = session.request(
+                method=method,
+                url=url,
+                headers=headers,
+                params=params,
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                return resp
+            if resp.status_code in retryable:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        sleep_s = float(retry_after)
+                    except Exception:
+                        sleep_s = None
+                else:
+                    sleep_s = None
+                if sleep_s is None:
+                    sleep_s = (DEFAULT_HTTP_BACKOFF * (2 ** attempt)) + random.random() * 0.2
+                time.sleep(sleep_s)
+                last_err = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+                continue
+            return resp
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            last_err = exc
+            sleep_s = (DEFAULT_HTTP_BACKOFF * (2 ** attempt)) + random.random() * 0.2
+            time.sleep(sleep_s)
+            continue
+
+    raise RuntimeError(f"request failed after {tries} tries: {method} {url} last={last_err}")
+
+
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    session: requests.Session,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    timeout=DEFAULT_TIMEOUT,
+    tries: int = DEFAULT_HTTP_RETRIES,
+) -> Any:
+    resp = _request_with_retry(
+        method,
+        url,
+        session=session,
+        headers=headers,
+        params=params,
+        timeout=timeout,
+        tries=tries,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+    return resp.json()
 
 
 def _build_headers(
@@ -85,9 +188,15 @@ def fetch_topic_page(
         waf_token or "",
         user_agent or DEFAULT_USER_AGENT,
     )
-    resp = requests.get(TOPIC_API_URL, params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+    session = _get_session("topic")
+    return _request_json(
+        "GET",
+        TOPIC_API_URL,
+        session=session,
+        params=params,
+        headers=headers,
+        timeout=DEFAULT_TIMEOUT,
+    )
 
 
 def _extract_items(payload: Any) -> Tuple[list, Dict[str, Any]]:
@@ -244,9 +353,15 @@ def fetch_market_depth(
         waf_token or "",
         user_agent or DEFAULT_USER_AGENT,
     )
-    resp = requests.get(DEPTH_API_URL, params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+    session = _get_session("depth")
+    return _request_json(
+        "GET",
+        DEPTH_API_URL,
+        session=session,
+        params=params,
+        headers=headers,
+        timeout=DEFAULT_TIMEOUT,
+    )
 
 
 def load_cached(path: str) -> Optional[Any]:
