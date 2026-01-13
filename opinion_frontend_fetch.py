@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import asyncio
 import json
 import math
@@ -7,6 +8,7 @@ import os
 import random
 import time
 import threading
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional, Tuple, List, Iterable, Sequence
 
 import aiohttp
@@ -32,6 +34,7 @@ DEFAULT_HTTP_BACKOFF = 0.6
 DEFAULT_OUTPUT = "opinion_topics_cache.json"
 DEFAULT_MERGED_OUTPUT = "opinion_topics_merged.json"
 DEFAULT_DEPTH_OUTPUT = "opinion_depth_cache.json"
+DEFAULT_DEPTH_UI_OUTPUT = "opinion_depth_ui.json"
 
 ITEM_KEYS = ("list", "records", "items", "topics", "rows", "data")
 TOTAL_KEYS = (
@@ -494,6 +497,141 @@ def _as_float(val: Any) -> Optional[float]:
         return None
 
 
+def ffloat(val: Any) -> Optional[float]:
+    return _as_float(val)
+
+
+def parse_best_bid_ask(book: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    # Opinion 可能在 result.data 下
+    if "result" in book and isinstance(book["result"], dict):
+        inner = book["result"].get("data") or book["result"]
+        if isinstance(inner, dict):
+            book = inner
+
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+
+    best_bid = None
+    best_bid_size = None
+    for x in bids:
+        p = ffloat(x.get("price"))
+        if p is None:
+            continue
+        if (best_bid is None) or (p > best_bid):
+            best_bid = p
+            best_bid_size = ffloat(x.get("size"))
+
+    best_ask = None
+    best_ask_size = None
+    for x in asks:
+        p = ffloat(x.get("price"))
+        if p is None:
+            continue
+        if (best_ask is None) or (p < best_ask):
+            best_ask = p
+            best_ask_size = ffloat(x.get("size"))
+
+    return {
+        "best_bid": best_bid,
+        "best_bid_size": best_bid_size,
+        "best_ask": best_ask,
+        "best_ask_size": best_ask_size,
+    }
+
+
+def _ui_market_key(entry: Dict[str, Any]) -> str:
+    for key in ("topicId", "questionId", "title"):
+        val = entry.get(key)
+        if val is not None and str(val).strip():
+            return str(val)
+    symbol = entry.get("symbol")
+    if symbol is not None and str(symbol).strip():
+        return str(symbol)
+    return "unknown"
+
+
+def build_depth_ui_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    markets: Dict[str, Dict[str, Any]] = {}
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        side = entry.get("side")
+        if side not in ("yes", "no"):
+            continue
+        key = _ui_market_key(entry)
+        info = markets.setdefault(
+            key,
+            {
+                "title": entry.get("title") or key,
+                "topicId": entry.get("topicId"),
+                "questionId": entry.get("questionId"),
+                "yes": {},
+                "no": {},
+            },
+        )
+        info[side] = {
+            "best_bid": entry.get("best_bid"),
+            "best_bid_size": entry.get("best_bid_size"),
+            "best_ask": entry.get("best_ask"),
+            "best_ask_size": entry.get("best_ask_size"),
+        }
+    rows = list(markets.values())
+    rows.sort(key=lambda x: str(x.get("title") or ""))
+    return rows
+
+
+def _unwrap_depth_book(book: Dict[str, Any]) -> Dict[str, Any]:
+    if "result" in book and isinstance(book["result"], dict):
+        inner = book["result"].get("data") or book["result"]
+        if isinstance(inner, dict):
+            return inner
+    return book
+
+
+def _complement_price(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    text = str(val).strip()
+    if not text:
+        return None
+    try:
+        dec = Decimal(text)
+    except InvalidOperation:
+        return None
+    complement = Decimal("1") - dec
+    if "." in text:
+        places = len(text.split(".", 1)[1])
+        quant = Decimal("1").scaleb(-places)
+        complement = complement.quantize(quant)
+    return float(complement)
+
+
+def _mirror_levels(levels: Iterable[Any]) -> List[Dict[str, Any]]:
+    mirrored: List[Dict[str, Any]] = []
+    for entry in levels:
+        if not isinstance(entry, dict):
+            continue
+        price = _complement_price(entry.get("price"))
+        if price is None:
+            continue
+        new_entry = dict(entry)
+        new_entry["price"] = price
+        mirrored.append(new_entry)
+    return mirrored
+
+
+def _mirror_depth_book(book: Dict[str, Any]) -> Dict[str, Any]:
+    mirrored = copy.deepcopy(book)
+    inner = _unwrap_depth_book(mirrored)
+    if not isinstance(inner, dict):
+        return mirrored
+    bids = inner.get("bids") or []
+    asks = inner.get("asks") or []
+    inner["bids"] = _mirror_levels(asks)
+    inner["asks"] = _mirror_levels(bids)
+    return mirrored
+
+
 def _parse_epoch_seconds(val: Any) -> Optional[float]:
     raw = _as_float(val)
     if raw is None or raw <= 0:
@@ -597,27 +735,38 @@ async def fetch_all_depths(
         topic_id = market.get("topicId")
         title = market.get("title")
 
-        for symbol_types, symbol, side in (
-            (0, yes_pos, "yes"),
-            (1, no_pos, "no"),
-        ):
-            if not question_id or not symbol:
-                continue
-            tasks.append(
-                {
-                    "topicId": topic_id,
-                    "title": title,
-                    "questionId": question_id,
-                    "symbol": symbol,
-                    "symbol_types": symbol_types,
-                    "side": side,
-                }
-            )
+        if not question_id:
+            continue
+        fetch_symbol = None
+        fetch_symbol_types = None
+        fetch_side = None
+        if yes_pos:
+            fetch_symbol = yes_pos
+            fetch_symbol_types = 0
+            fetch_side = "yes"
+        elif no_pos:
+            fetch_symbol = no_pos
+            fetch_symbol_types = 1
+            fetch_side = "no"
+        if not fetch_symbol:
+            continue
+        tasks.append(
+            {
+                "topicId": topic_id,
+                "title": title,
+                "questionId": question_id,
+                "symbol": fetch_symbol,
+                "symbol_types": fetch_symbol_types,
+                "side": fetch_side,
+                "yes_pos": yes_pos,
+                "no_pos": no_pos,
+            }
+        )
 
     if max_requests is not None:
         tasks = tasks[:max_requests]
 
-    results: List[Optional[Dict[str, Any]]] = [None] * len(tasks)
+    results: List[Dict[str, Any]] = []
     stats = {
         "ok": 0,
         "failed": 0,
@@ -630,9 +779,36 @@ async def fetch_all_depths(
     workers = max(1, int(max_workers))
     sem = asyncio.Semaphore(workers)
 
+    def _build_result(
+        task: Dict[str, Any],
+        *,
+        side: str,
+        symbol: str,
+        symbol_types: int,
+        response: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        derived: bool = False,
+    ) -> Dict[str, Any]:
+        result = {
+            "topicId": task["topicId"],
+            "title": task["title"],
+            "questionId": task["questionId"],
+            "symbol": symbol,
+            "symbol_types": symbol_types,
+            "side": side,
+        }
+        if derived:
+            result["derived"] = True
+        if response is not None:
+            result["response"] = response
+            result.update(parse_best_bid_ask(response))
+        if error is not None:
+            result["error"] = error
+        return result
+
     async def _run(
-        idx: int, task: Dict[str, Any]
-    ) -> Tuple[int, Dict[str, Any], Optional[Exception], float]:
+        task: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Exception], float]:
         async with sem:
             try:
                 t_start = time.monotonic()
@@ -650,42 +826,57 @@ async def fetch_all_depths(
                 t_end = time.monotonic()
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
-                return (
-                    idx,
-                    {
-                        "topicId": task["topicId"],
-                        "title": task["title"],
-                        "questionId": task["questionId"],
-                        "symbol": task["symbol"],
-                        "symbol_types": task["symbol_types"],
-                        "side": task["side"],
-                        "response": payload,
-                    },
-                    None,
-                    (t_end - t_start) * 1000.0,
+                primary = _build_result(
+                    task,
+                    side=task["side"],
+                    symbol=task["symbol"],
+                    symbol_types=task["symbol_types"],
+                    response=payload,
                 )
+                derived: Optional[Dict[str, Any]] = None
+                if task["side"] == "yes" and task.get("no_pos"):
+                    mirrored = _mirror_depth_book(payload)
+                    derived = _build_result(
+                        task,
+                        side="no",
+                        symbol=task["no_pos"],
+                        symbol_types=1,
+                        response=mirrored,
+                        derived=True,
+                    )
+                elif task["side"] == "no" and task.get("yes_pos"):
+                    mirrored = _mirror_depth_book(payload)
+                    derived = _build_result(
+                        task,
+                        side="yes",
+                        symbol=task["yes_pos"],
+                        symbol_types=0,
+                        response=mirrored,
+                        derived=True,
+                    )
+                return (primary, derived, None, (t_end - t_start) * 1000.0)
             except Exception as exc:
                 t_end = time.monotonic()
                 return (
-                    idx,
-                    {
-                        "topicId": task["topicId"],
-                        "title": task["title"],
-                        "questionId": task["questionId"],
-                        "symbol": task["symbol"],
-                        "symbol_types": task["symbol_types"],
-                        "side": task["side"],
-                        "error": str(exc),
-                    },
+                    _build_result(
+                        task,
+                        side=task["side"],
+                        symbol=task["symbol"],
+                        symbol_types=task["symbol_types"],
+                        error=str(exc),
+                    ),
+                    None,
                     exc,
                     (t_end - t_start) * 1000.0,
                 )
 
     if tasks:
-        coros = [_run(i, t) for i, t in enumerate(tasks)]
+        coros = [_run(t) for t in tasks]
         for fut in asyncio.as_completed(coros):
-            idx, result, err, latency_ms = await fut
-            results[idx] = result
+            result, derived, err, latency_ms = await fut
+            results.append(result)
+            if derived is not None:
+                results.append(derived)
             latencies_ms.append(latency_ms)
             latency_samples.append(
                 {
@@ -749,6 +940,7 @@ def main() -> int:
     ap.add_argument("--fetch-depth", action="store_true", help="Fetch market depth for all topics.")
     ap.add_argument("--topics-input", default=DEFAULT_MERGED_OUTPUT)
     ap.add_argument("--depth-output", default=DEFAULT_DEPTH_OUTPUT)
+    ap.add_argument("--depth-ui-output", default=DEFAULT_DEPTH_UI_OUTPUT)
     ap.add_argument("--depth-sleep", type=float, default=0.0)
     ap.add_argument("--depth-max-requests", type=int, default=None)
     ap.add_argument("--depth-workers", type=int, default=8)
@@ -844,6 +1036,23 @@ def main() -> int:
                     if args.depth_latency_samples and args.depth_latency_samples > 0:
                         samples = stats.get("latency_samples") or []
                         payload["latency_samples"] = samples[: int(args.depth_latency_samples)]
+                    payload["results"] = results
+                    save_json(args.depth_output, payload)
+                    ui_rows = build_depth_ui_results(results)
+                    ui_payload = {
+                        "timestamp": ts,
+                        "round": round_idx,
+                        "count": len(ui_rows),
+                        "ok": stats["ok"],
+                        "failed": stats["failed"],
+                        "success_rate": success_rate,
+                        "skipped_cutoff": stats["skipped_cutoff"],
+                        "skipped_volume": stats["skipped_volume"],
+                        "elapsed_seconds": round(elapsed, 3),
+                        "results": ui_rows,
+                    }
+                    if args.depth_ui_output:
+                        save_json(args.depth_ui_output, ui_payload)
                     print(json.dumps(payload, ensure_ascii=True, indent=2))
                     if args.depth_interval and args.depth_interval > 0:
                         await asyncio.sleep(args.depth_interval)
