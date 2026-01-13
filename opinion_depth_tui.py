@@ -46,6 +46,55 @@ def _fmt_quote(price: Any, size: Any) -> str:
     return f"{price_s}@{size_s}"
 
 
+def _fmt_latency_val(val: Any) -> str:
+    try:
+        num = float(val)
+    except Exception:
+        return "--"
+    return f"{num:.1f}ms"
+
+
+def _fmt_latency_count(val: Any) -> str:
+    try:
+        num = int(val)
+    except Exception:
+        return "--"
+    return str(num)
+
+
+def _fmt_latency_block(meta: Dict[str, Any]) -> List[str]:
+    latency = meta.get("latency_ms")
+    if not isinstance(latency, dict) or not latency:
+        return []
+    count = _fmt_latency_count(latency.get("count"))
+    min_v = _fmt_latency_val(latency.get("min"))
+    max_v = _fmt_latency_val(latency.get("max"))
+    avg = _fmt_latency_val(latency.get("avg"))
+    p50 = _fmt_latency_val(latency.get("p50"))
+    p90 = _fmt_latency_val(latency.get("p90"))
+    p95 = _fmt_latency_val(latency.get("p95"))
+    p99 = _fmt_latency_val(latency.get("p99"))
+    buckets = latency.get("buckets") if isinstance(latency.get("buckets"), dict) else {}
+    bucket_line = (
+        f"buckets<=50:{buckets.get('le_50', 0)} <=100:{buckets.get('le_100', 0)} "
+        f"<=200:{buckets.get('le_200', 0)} <=500:{buckets.get('le_500', 0)} "
+        f"<=1000:{buckets.get('le_1000', 0)} >1000:{buckets.get('gt_1000', 0)}"
+    )
+    slowest = latency.get("slowest")
+    slowest_line = ""
+    if isinstance(slowest, list) and slowest:
+        slowest_vals = ", ".join(_fmt_latency_val(v) for v in slowest)
+        slowest_line = f"slowest={slowest_vals}"
+    lines = [
+        f"latency count={count} min={min_v} max={max_v} avg={avg}",
+        f"latency p50={p50} p90={p90} p95={p95} p99={p99}",
+        _truncate(bucket_line, 120),
+    ]
+    if slowest_line:
+        lines.append(_truncate(slowest_line, 120))
+    return lines
+
+
 def _truncate(text: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -132,7 +181,7 @@ def _extract_rows(payload: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
 class DepthApp(App):
     CSS = """
     #header {
-        height: 4;
+        height: 7;
     }
     #errors {
         height: 2;
@@ -212,15 +261,17 @@ class DepthApp(App):
         elapsed = self.meta.get("elapsed_seconds")
         skipped_cutoff = self.meta.get("skipped_cutoff")
         skipped_volume = self.meta.get("skipped_volume")
+        latency_lines = _fmt_latency_block(self.meta)
+        header_lines = [
+            f"Opinion Depth TUI  {ts}",
+            f"round={round_idx} count={len(self.rows)} ok={ok} failed={failed} "
+            f"success={success} elapsed={elapsed}",
+            f"skipped_cutoff={skipped_cutoff} skipped_volume={skipped_volume}",
+        ]
+        if latency_lines:
+            header_lines.extend(latency_lines)
         header.update(
-            "\n".join(
-                [
-                    f"Opinion Depth TUI  {ts}",
-                    f"round={round_idx} count={len(self.rows)} ok={ok} failed={failed} "
-                    f"success={success} elapsed={elapsed}",
-                    f"skipped_cutoff={skipped_cutoff} skipped_volume={skipped_volume}",
-                ]
-            )
+            "\n".join(header_lines)
         )
         error_lines = []
         for item in (self.meta.get("error_samples") or [])[:2]:

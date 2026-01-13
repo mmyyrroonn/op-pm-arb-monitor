@@ -982,6 +982,11 @@ def main() -> int:
     ap.add_argument("--depth-max-requests", type=int, default=None)
     ap.add_argument("--depth-workers", type=int, default=8)
     ap.add_argument(
+        "--depth-print",
+        action="store_true",
+        help="Print depth payload to stdout each round.",
+    )
+    ap.add_argument(
         "--depth-latency-samples",
         type=int,
         default=0,
@@ -1086,6 +1091,7 @@ def main() -> int:
                         "skipped_cutoff": stats["skipped_cutoff"],
                         "skipped_volume": stats["skipped_volume"],
                         "elapsed_seconds": round(elapsed, 3),
+                        "latency_ms": stats.get("latency_ms"),
                         "results": ui_rows,
                     }
                     error_samples = stats.get("error_samples") or []
@@ -1093,7 +1099,8 @@ def main() -> int:
                         ui_payload["error_samples"] = error_samples[:10]
                     if args.depth_ui_output:
                         save_json(args.depth_ui_output, ui_payload)
-                    print(json.dumps(payload, ensure_ascii=True, indent=2))
+                    if args.depth_print:
+                        print(json.dumps(payload, ensure_ascii=True, indent=2))
                     if args.depth_interval and args.depth_interval > 0:
                         await asyncio.sleep(args.depth_interval)
 
