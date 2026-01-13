@@ -502,6 +502,13 @@ def ffloat(val: Any) -> Optional[float]:
 
 
 def parse_best_bid_ask(book: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    if not isinstance(book, dict):
+        return {
+            "best_bid": None,
+            "best_bid_size": None,
+            "best_ask": None,
+            "best_ask_size": None,
+        }
     # Opinion 可能在 result.data 下
     if "result" in book and isinstance(book["result"], dict):
         inner = book["result"].get("data") or book["result"]
@@ -775,6 +782,7 @@ async def fetch_all_depths(
     }
     latencies_ms: List[float] = []
     latency_samples: List[Dict[str, Any]] = []
+    error_samples: List[Dict[str, Any]] = []
 
     workers = max(1, int(max_workers))
     sem = asyncio.Semaphore(workers)
@@ -890,10 +898,20 @@ async def fetch_all_depths(
                 stats["ok"] += 1
             else:
                 stats["failed"] += 1
+                if len(error_samples) < 50:
+                    error_samples.append(
+                        {
+                            "topicId": result.get("topicId"),
+                            "symbol": result.get("symbol"),
+                            "side": result.get("side"),
+                            "error": result.get("error") or str(err),
+                        }
+                    )
 
     stats["latency_ms"] = _summarize_latencies_ms(latencies_ms)
     latency_samples.sort(key=lambda x: x["latency_ms"], reverse=True)
     stats["latency_samples"] = latency_samples
+    stats["error_samples"] = error_samples
 
     return [r for r in results if r is not None], stats
 
@@ -1051,6 +1069,9 @@ def main() -> int:
                         "elapsed_seconds": round(elapsed, 3),
                         "results": ui_rows,
                     }
+                    error_samples = stats.get("error_samples") or []
+                    if error_samples:
+                        ui_payload["error_samples"] = error_samples[:10]
                     if args.depth_ui_output:
                         save_json(args.depth_ui_output, ui_payload)
                     print(json.dumps(payload, ensure_ascii=True, indent=2))

@@ -134,6 +134,9 @@ class DepthApp(App):
     #header {
         height: 4;
     }
+    #errors {
+        height: 2;
+    }
     #footer {
         height: 1;
     }
@@ -161,6 +164,7 @@ class DepthApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="header")
+        yield Static("", id="errors")
         yield DataTable(id="table")
         yield Static("", id="footer")
 
@@ -196,6 +200,7 @@ class DepthApp(App):
 
     def _render(self) -> None:
         header = self.query_one("#header", Static)
+        errors = self.query_one("#errors", Static)
         footer = self.query_one("#footer", Static)
         table = self.query_one(DataTable)
 
@@ -217,6 +222,15 @@ class DepthApp(App):
                 ]
             )
         )
+        error_lines = []
+        for item in (self.meta.get("error_samples") or [])[:2]:
+            msg = str(item.get("error") or "")
+            if msg:
+                error_lines.append(_truncate(f"{item.get('side')} {item.get('symbol')}: {msg}", 120))
+        if error_lines:
+            errors.update("\n".join(error_lines))
+        else:
+            errors.update("")
         footer.update(f"page {self.page + 1}/{self.total_pages}  n/p:page  r:reload  q:quit")
 
         table.clear()
