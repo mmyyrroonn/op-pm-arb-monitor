@@ -790,7 +790,11 @@ async def fetch_all_depths(
         )
 
     if max_requests is not None:
-        tasks = tasks[:max_requests]
+        if max_requests <= 0:
+            tasks = []
+        else:
+            random.shuffle(tasks)
+            tasks = tasks[:max_requests]
 
     results: List[Dict[str, Any]] = []
     stats = {
