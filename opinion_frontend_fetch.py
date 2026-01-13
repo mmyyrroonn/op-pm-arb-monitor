@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import asyncio
 import json
 import os
 import random
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, Tuple, List, Iterable, Sequence
 
+import aiohttp
 import requests
 from requests.adapters import HTTPAdapter
 from dotenv import load_dotenv
@@ -139,6 +140,61 @@ def _request_json(
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
     return resp.json()
+
+
+def _build_async_session(limit: int) -> aiohttp.ClientSession:
+    timeout = aiohttp.ClientTimeout(sock_connect=DEFAULT_TIMEOUT[0], sock_read=DEFAULT_TIMEOUT[1])
+    connector = aiohttp.TCPConnector(limit=limit, limit_per_host=limit)
+    return aiohttp.ClientSession(timeout=timeout, connector=connector)
+
+
+async def _async_request_json(
+    method: str,
+    url: str,
+    *,
+    session: aiohttp.ClientSession,
+    headers: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    tries: int = DEFAULT_HTTP_RETRIES,
+) -> Any:
+    last_err: Optional[Exception] = None
+    retryable = {429, 500, 502, 503, 504}
+
+    for attempt in range(max(1, tries)):
+        try:
+            async with session.request(method, url, headers=headers, params=params) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+
+                if resp.status in retryable:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            sleep_s = float(retry_after)
+                        except Exception:
+                            sleep_s = None
+                    else:
+                        sleep_s = None
+                    if sleep_s is None:
+                        sleep_s = (DEFAULT_HTTP_BACKOFF * (2 ** attempt)) + random.random() * 0.2
+                    await asyncio.sleep(sleep_s)
+                    txt = await resp.text()
+                    last_err = RuntimeError(f"HTTP {resp.status}: {txt[:200]}")
+                    continue
+
+                txt = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {txt[:200]}")
+
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+            last_err = exc
+            sleep_s = (DEFAULT_HTTP_BACKOFF * (2 ** attempt)) + random.random() * 0.2
+            await asyncio.sleep(sleep_s)
+            continue
+        except aiohttp.ClientError as exc:
+            last_err = exc
+            break
+
+    raise RuntimeError(f"request failed after {tries} tries: {method} {url} last={last_err}")
 
 
 def _build_headers(
@@ -364,6 +420,39 @@ def fetch_market_depth(
     )
 
 
+async def fetch_market_depth_async(
+    question_id: str,
+    symbol: str,
+    symbol_types: int,
+    *,
+    session: aiohttp.ClientSession,
+    auth_token: Optional[str] = None,
+    auth_tokens: Optional[Sequence[str]] = None,
+    device_fingerprint: Optional[str] = None,
+    waf_token: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    params = {
+        "symbol_types": symbol_types,
+        "question_id": question_id,
+        "symbol": symbol,
+        "chainId": 56,
+    }
+    headers = _build_headers(
+        _choose_auth_token(auth_token, auth_tokens),
+        device_fingerprint or DEFAULT_DEVICE_FINGERPRINT,
+        waf_token or "",
+        user_agent or DEFAULT_USER_AGENT,
+    )
+    return await _async_request_json(
+        "GET",
+        DEPTH_API_URL,
+        session=session,
+        params=params,
+        headers=headers,
+    )
+
+
 def load_cached(path: str) -> Optional[Any]:
     if not path or not os.path.exists(path):
         return None
@@ -413,8 +502,10 @@ def _parse_epoch_seconds(val: Any) -> Optional[float]:
     return raw
 
 
-def fetch_all_depths(
+async def fetch_all_depths(
     topics_raw: Any,
+    *,
+    session: aiohttp.ClientSession,
     auth_token: Optional[str] = None,
     auth_tokens: Optional[Sequence[str]] = None,
     device_fingerprint: Optional[str] = None,
@@ -480,41 +571,42 @@ def fetch_all_depths(
         "skipped_volume": skipped_volume,
     }
 
-    def _run(idx: int, task: Dict[str, Any]) -> Dict[str, Any]:
-        payload = fetch_market_depth(
-            question_id=task["questionId"],
-            symbol=task["symbol"],
-            symbol_types=task["symbol_types"],
-            auth_token=auth_token,
-            auth_tokens=auth_tokens,
-            device_fingerprint=device_fingerprint,
-            waf_token=waf_token,
-            user_agent=user_agent,
-        )
-        if sleep_s > 0:
-            time.sleep(sleep_s)
-        return {
-            "topicId": task["topicId"],
-            "title": task["title"],
-            "questionId": task["questionId"],
-            "symbol": task["symbol"],
-            "symbol_types": task["symbol_types"],
-            "side": task["side"],
-            "response": payload,
-        }
-
     workers = max(1, int(max_workers))
-    if tasks:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_run, i, t): i for i, t in enumerate(tasks)}
-            for fut in as_completed(futures):
-                idx = futures[fut]
-                try:
-                    results[idx] = fut.result()
-                    stats["ok"] += 1
-                except Exception as exc:
-                    task = tasks[idx]
-                    results[idx] = {
+    sem = asyncio.Semaphore(workers)
+
+    async def _run(idx: int, task: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[Exception]]:
+        async with sem:
+            try:
+                payload = await fetch_market_depth_async(
+                    question_id=task["questionId"],
+                    symbol=task["symbol"],
+                    symbol_types=task["symbol_types"],
+                    session=session,
+                    auth_token=auth_token,
+                    auth_tokens=auth_tokens,
+                    device_fingerprint=device_fingerprint,
+                    waf_token=waf_token,
+                    user_agent=user_agent,
+                )
+                if sleep_s > 0:
+                    await asyncio.sleep(sleep_s)
+                return (
+                    idx,
+                    {
+                        "topicId": task["topicId"],
+                        "title": task["title"],
+                        "questionId": task["questionId"],
+                        "symbol": task["symbol"],
+                        "symbol_types": task["symbol_types"],
+                        "side": task["side"],
+                        "response": payload,
+                    },
+                    None,
+                )
+            except Exception as exc:
+                return (
+                    idx,
+                    {
                         "topicId": task["topicId"],
                         "title": task["title"],
                         "questionId": task["questionId"],
@@ -522,8 +614,19 @@ def fetch_all_depths(
                         "symbol_types": task["symbol_types"],
                         "side": task["side"],
                         "error": str(exc),
-                    }
-                    stats["failed"] += 1
+                    },
+                    exc,
+                )
+
+    if tasks:
+        coros = [_run(i, t) for i, t in enumerate(tasks)]
+        for fut in asyncio.as_completed(coros):
+            idx, result, err = await fut
+            results[idx] = result
+            if err is None:
+                stats["ok"] += 1
+            else:
+                stats["failed"] += 1
 
     return [r for r in results if r is not None], stats
 
@@ -619,50 +722,56 @@ def main() -> int:
         if topics_raw is None:
             print(json.dumps({"error": "topics file not found"}, ensure_ascii=True, indent=2))
             return 1
-        round_idx = 0
-        try:
-            while True:
-                round_idx += 1
-                t0 = time.monotonic()
-                results, stats = fetch_all_depths(
-                    topics_raw,
-                    auth_tokens=auth_tokens,
-                    device_fingerprint=args.device_fingerprint,
-                    waf_token=args.waf_token,
-                    user_agent=args.user_agent,
-                    sleep_s=args.depth_sleep,
-                    max_requests=args.depth_max_requests,
-                    max_workers=args.depth_workers,
-                    cutoff_hours=args.depth_cutoff_hours,
-                    min_volume=args.depth_min_volume if args.depth_min_volume > 0 else None,
-                )
-                elapsed = time.monotonic() - t0
-                total = stats["ok"] + stats["failed"]
-                success_rate = round((stats["ok"] / total) if total else 0.0, 4)
-                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                print(
-                    json.dumps(
-                        {
-                            "timestamp": ts,
-                            "round": round_idx,
-                            "count": len(results),
-                            "ok": stats["ok"],
-                            "failed": stats["failed"],
-                            "success_rate": success_rate,
-                            "skipped_cutoff": stats["skipped_cutoff"],
-                            "skipped_volume": stats["skipped_volume"],
-                            "elapsed_seconds": round(elapsed, 3),
-                            "output": args.depth_output,
-                        },
-                        ensure_ascii=True,
-                        indent=2,
+        async def _run_depth_loop() -> None:
+            round_idx = 0
+            workers = max(1, int(args.depth_workers))
+            async with _build_async_session(workers) as session:
+                while True:
+                    round_idx += 1
+                    t0 = time.monotonic()
+                    results, stats = await fetch_all_depths(
+                        topics_raw,
+                        session=session,
+                        auth_tokens=auth_tokens,
+                        device_fingerprint=args.device_fingerprint,
+                        waf_token=args.waf_token,
+                        user_agent=args.user_agent,
+                        sleep_s=args.depth_sleep,
+                        max_requests=args.depth_max_requests,
+                        max_workers=workers,
+                        cutoff_hours=args.depth_cutoff_hours,
+                        min_volume=args.depth_min_volume if args.depth_min_volume > 0 else None,
                     )
-                )
-                if args.depth_interval and args.depth_interval > 0:
-                    time.sleep(args.depth_interval)
+                    elapsed = time.monotonic() - t0
+                    total = stats["ok"] + stats["failed"]
+                    success_rate = round((stats["ok"] / total) if total else 0.0, 4)
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                    print(
+                        json.dumps(
+                            {
+                                "timestamp": ts,
+                                "round": round_idx,
+                                "count": len(results),
+                                "ok": stats["ok"],
+                                "failed": stats["failed"],
+                                "success_rate": success_rate,
+                                "skipped_cutoff": stats["skipped_cutoff"],
+                                "skipped_volume": stats["skipped_volume"],
+                                "elapsed_seconds": round(elapsed, 3),
+                                "output": args.depth_output,
+                            },
+                            ensure_ascii=True,
+                            indent=2,
+                        )
+                    )
+                    if args.depth_interval and args.depth_interval > 0:
+                        await asyncio.sleep(args.depth_interval)
+
+        try:
+            asyncio.run(_run_depth_loop())
         except KeyboardInterrupt:
             print(json.dumps({"stopped": True}, ensure_ascii=True, indent=2))
-            return 0
+        return 0
 
     if not args.refresh:
         cached = load_cached(args.output)

@@ -2,3 +2,4 @@ requests
 python-dotenv
 urllib3
 eth-account
+aiohttp
