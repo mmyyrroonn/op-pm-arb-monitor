@@ -280,6 +280,24 @@ def _as_str(val: Any) -> str:
     return str(val).strip() if val is not None else ""
 
 
+def _as_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_epoch_seconds(val: Any) -> Optional[float]:
+    raw = _as_float(val)
+    if raw is None or raw <= 0:
+        return None
+    if raw > 1_000_000_000_000:
+        return raw / 1000.0
+    return raw
+
+
 def fetch_all_depths(
     topics_raw: Any,
     auth_token: Optional[str] = None,
@@ -290,11 +308,29 @@ def fetch_all_depths(
     sleep_s: float = 0.0,
     max_requests: Optional[int] = None,
     max_workers: int = 1,
+    cutoff_hours: Optional[float] = 24.0,
+    min_volume: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     items = merge_cached_items(topics_raw)
     tasks: List[Dict[str, Any]] = []
+    now_s = time.time()
+    cutoff_window_s = None
+    if cutoff_hours is not None and cutoff_hours > 0:
+        cutoff_window_s = cutoff_hours * 3600.0
 
+    skipped_cutoff = 0
+    skipped_volume = 0
     for market in _iter_markets(items):
+        cutoff_time = _parse_epoch_seconds(market.get("cutoffTime"))
+        if cutoff_window_s is not None and cutoff_time is not None:
+            if cutoff_time <= now_s + cutoff_window_s:
+                skipped_cutoff += 1
+                continue
+        volume = _as_float(market.get("volume"))
+        if min_volume is not None and min_volume > 0:
+            if volume is not None and volume < min_volume:
+                skipped_volume += 1
+                continue
         question_id = _as_str(market.get("questionId"))
         yes_pos = _as_str(market.get("yesPos"))
         no_pos = _as_str(market.get("noPos"))
@@ -322,7 +358,12 @@ def fetch_all_depths(
         tasks = tasks[:max_requests]
 
     results: List[Optional[Dict[str, Any]]] = [None] * len(tasks)
-    stats = {"ok": 0, "failed": 0}
+    stats = {
+        "ok": 0,
+        "failed": 0,
+        "skipped_cutoff": skipped_cutoff,
+        "skipped_volume": skipped_volume,
+    }
 
     def _run(idx: int, task: Dict[str, Any]) -> Dict[str, Any]:
         payload = fetch_market_depth(
@@ -417,6 +458,18 @@ def main() -> int:
     ap.add_argument("--depth-sleep", type=float, default=0.0)
     ap.add_argument("--depth-max-requests", type=int, default=None)
     ap.add_argument("--depth-workers", type=int, default=8)
+    ap.add_argument(
+        "--depth-cutoff-hours",
+        type=float,
+        default=24.0,
+        help="Skip topics expiring within this many hours (cutoffTime).",
+    )
+    ap.add_argument(
+        "--depth-min-volume",
+        type=float,
+        default=0.0,
+        help="Skip topics with volume below this threshold.",
+    )
     ap.add_argument("--refresh", action="store_true", help="Ignore cached file and re-fetch.")
     ap.add_argument("--auth", default=os.getenv("OPINION_FRONTEND_AUTH", "").strip() or None)
     ap.add_argument(
@@ -455,6 +508,8 @@ def main() -> int:
             sleep_s=args.depth_sleep,
             max_requests=args.depth_max_requests,
             max_workers=args.depth_workers,
+            cutoff_hours=args.depth_cutoff_hours,
+            min_volume=args.depth_min_volume if args.depth_min_volume > 0 else None,
         )
         elapsed = time.monotonic() - t0
         print(
@@ -463,6 +518,8 @@ def main() -> int:
                     "count": len(results),
                     "ok": stats["ok"],
                     "failed": stats["failed"],
+                    "skipped_cutoff": stats["skipped_cutoff"],
+                    "skipped_volume": stats["skipped_volume"],
                     "elapsed_seconds": round(elapsed, 3),
                     "output": args.depth_output,
                 },
