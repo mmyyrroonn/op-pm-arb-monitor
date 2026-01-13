@@ -625,6 +625,7 @@ async def fetch_all_depths(
         "skipped_volume": skipped_volume,
     }
     latencies_ms: List[float] = []
+    latency_samples: List[Dict[str, Any]] = []
 
     workers = max(1, int(max_workers))
     sem = asyncio.Semaphore(workers)
@@ -686,12 +687,22 @@ async def fetch_all_depths(
             idx, result, err, latency_ms = await fut
             results[idx] = result
             latencies_ms.append(latency_ms)
+            latency_samples.append(
+                {
+                    "latency_ms": latency_ms,
+                    "topicId": result.get("topicId"),
+                    "symbol": result.get("symbol"),
+                    "side": result.get("side"),
+                }
+            )
             if err is None:
                 stats["ok"] += 1
             else:
                 stats["failed"] += 1
 
     stats["latency_ms"] = _summarize_latencies_ms(latencies_ms)
+    latency_samples.sort(key=lambda x: x["latency_ms"], reverse=True)
+    stats["latency_samples"] = latency_samples
 
     return [r for r in results if r is not None], stats
 
@@ -741,6 +752,12 @@ def main() -> int:
     ap.add_argument("--depth-sleep", type=float, default=0.0)
     ap.add_argument("--depth-max-requests", type=int, default=None)
     ap.add_argument("--depth-workers", type=int, default=8)
+    ap.add_argument(
+        "--depth-latency-samples",
+        type=int,
+        default=0,
+        help="Print slowest N depth requests with topicId/symbol/side.",
+    )
     ap.add_argument(
         "--depth-interval",
         type=float,
@@ -811,25 +828,23 @@ def main() -> int:
                     total = stats["ok"] + stats["failed"]
                     success_rate = round((stats["ok"] / total) if total else 0.0, 4)
                     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-                    print(
-                        json.dumps(
-                            {
-                                "timestamp": ts,
-                                "round": round_idx,
-                                "count": len(results),
-                                "ok": stats["ok"],
-                                "failed": stats["failed"],
-                                "success_rate": success_rate,
-                                "skipped_cutoff": stats["skipped_cutoff"],
-                                "skipped_volume": stats["skipped_volume"],
-                                "elapsed_seconds": round(elapsed, 3),
-                                "latency_ms": stats.get("latency_ms"),
-                                "output": args.depth_output,
-                            },
-                            ensure_ascii=True,
-                            indent=2,
-                        )
-                    )
+                    payload = {
+                        "timestamp": ts,
+                        "round": round_idx,
+                        "count": len(results),
+                        "ok": stats["ok"],
+                        "failed": stats["failed"],
+                        "success_rate": success_rate,
+                        "skipped_cutoff": stats["skipped_cutoff"],
+                        "skipped_volume": stats["skipped_volume"],
+                        "elapsed_seconds": round(elapsed, 3),
+                        "latency_ms": stats.get("latency_ms"),
+                        "output": args.depth_output,
+                    }
+                    if args.depth_latency_samples and args.depth_latency_samples > 0:
+                        samples = stats.get("latency_samples") or []
+                        payload["latency_samples"] = samples[: int(args.depth_latency_samples)]
+                    print(json.dumps(payload, ensure_ascii=True, indent=2))
                     if args.depth_interval and args.depth_interval > 0:
                         await asyncio.sleep(args.depth_interval)
 
