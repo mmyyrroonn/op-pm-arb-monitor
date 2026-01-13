@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import math
 import os
 import random
 import time
@@ -502,6 +503,59 @@ def _parse_epoch_seconds(val: Any) -> Optional[float]:
     return raw
 
 
+def _percentile(sorted_vals: List[float], p: float) -> Optional[float]:
+    if not sorted_vals:
+        return None
+    if p <= 0:
+        return sorted_vals[0]
+    if p >= 1:
+        return sorted_vals[-1]
+    idx = int(math.ceil(p * len(sorted_vals))) - 1
+    idx = max(0, min(idx, len(sorted_vals) - 1))
+    return sorted_vals[idx]
+
+
+def _summarize_latencies_ms(values: List[float]) -> Dict[str, Any]:
+    if not values:
+        return {"count": 0}
+    vals = sorted(values)
+    total = sum(vals)
+    n = len(vals)
+    buckets = {
+        "le_50": 0,
+        "le_100": 0,
+        "le_200": 0,
+        "le_500": 0,
+        "le_1000": 0,
+        "gt_1000": 0,
+    }
+    for v in vals:
+        if v <= 50:
+            buckets["le_50"] += 1
+        elif v <= 100:
+            buckets["le_100"] += 1
+        elif v <= 200:
+            buckets["le_200"] += 1
+        elif v <= 500:
+            buckets["le_500"] += 1
+        elif v <= 1000:
+            buckets["le_1000"] += 1
+        else:
+            buckets["gt_1000"] += 1
+    return {
+        "count": n,
+        "min": round(vals[0], 3),
+        "max": round(vals[-1], 3),
+        "avg": round(total / n, 3),
+        "p50": round(_percentile(vals, 0.5) or 0.0, 3),
+        "p90": round(_percentile(vals, 0.9) or 0.0, 3),
+        "p95": round(_percentile(vals, 0.95) or 0.0, 3),
+        "p99": round(_percentile(vals, 0.99) or 0.0, 3),
+        "buckets": buckets,
+        "slowest": [round(v, 3) for v in vals[-5:][::-1]],
+    }
+
+
 async def fetch_all_depths(
     topics_raw: Any,
     *,
@@ -570,13 +624,17 @@ async def fetch_all_depths(
         "skipped_cutoff": skipped_cutoff,
         "skipped_volume": skipped_volume,
     }
+    latencies_ms: List[float] = []
 
     workers = max(1, int(max_workers))
     sem = asyncio.Semaphore(workers)
 
-    async def _run(idx: int, task: Dict[str, Any]) -> Tuple[int, Dict[str, Any], Optional[Exception]]:
+    async def _run(
+        idx: int, task: Dict[str, Any]
+    ) -> Tuple[int, Dict[str, Any], Optional[Exception], float]:
         async with sem:
             try:
+                t_start = time.monotonic()
                 payload = await fetch_market_depth_async(
                     question_id=task["questionId"],
                     symbol=task["symbol"],
@@ -588,6 +646,7 @@ async def fetch_all_depths(
                     waf_token=waf_token,
                     user_agent=user_agent,
                 )
+                t_end = time.monotonic()
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
                 return (
@@ -602,8 +661,10 @@ async def fetch_all_depths(
                         "response": payload,
                     },
                     None,
+                    (t_end - t_start) * 1000.0,
                 )
             except Exception as exc:
+                t_end = time.monotonic()
                 return (
                     idx,
                     {
@@ -616,17 +677,21 @@ async def fetch_all_depths(
                         "error": str(exc),
                     },
                     exc,
+                    (t_end - t_start) * 1000.0,
                 )
 
     if tasks:
         coros = [_run(i, t) for i, t in enumerate(tasks)]
         for fut in asyncio.as_completed(coros):
-            idx, result, err = await fut
+            idx, result, err, latency_ms = await fut
             results[idx] = result
+            latencies_ms.append(latency_ms)
             if err is None:
                 stats["ok"] += 1
             else:
                 stats["failed"] += 1
+
+    stats["latency_ms"] = _summarize_latencies_ms(latencies_ms)
 
     return [r for r in results if r is not None], stats
 
@@ -758,6 +823,7 @@ def main() -> int:
                                 "skipped_cutoff": stats["skipped_cutoff"],
                                 "skipped_volume": stats["skipped_volume"],
                                 "elapsed_seconds": round(elapsed, 3),
+                                "latency_ms": stats.get("latency_ms"),
                                 "output": args.depth_output,
                             },
                             ensure_ascii=True,
