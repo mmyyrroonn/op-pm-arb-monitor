@@ -7,12 +7,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, Tuple, List, Iterable
 
 import requests
+from dotenv import load_dotenv
 
 TOPIC_API_URL = "https://proxy.opinion.trade:8443/api/bsc/api/v2/topic"
 DEPTH_API_URL = "https://proxy.opinion.trade:8443/api/bsc/api/v2/order/market/depth"
 
 DEFAULT_AUTH_TOKEN = (
-    "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxMDIwMjQ0LCJ3YWxsZXRfYWRkcmVzcyI6IjB4NzgxZWU1OWVjNGI2MjNlYTViODE0ZDhjOWMzZGIwMzkwMWFjNjUyMyIsIndhbGxldF91c2VyIjp7IjU2IjoiMHhhNzAwZjI0OTQwZGIwNTM1YzIwMTFjNTQ0Yzk4NDQ3YTQ4N2RhNDIwIn0sImlzcyI6InByZWRpY3Rpb25fbWFya2V0IiwiZXhwIjoxNzY4MzgxMTU2LCJpYXQiOjE3NjgyOTQ3NTZ9.NbuTQUI0g5DYladxag9B9UApmadlKgT4w7q3HTvaZ-s"
+    "Bearer .eyJ1c2VyX2lkIjoxMTgwODc3LCJ3YWxsZXRfYWRkcmVzcyI6IjB4NTVkZmVhZGRhMThmMDJjMWIxNjljOTU1NTJkNThhYjAyMGU5MTA5NiIsIndhbGxldF91c2VyIjp7fSwiaXNzIjoicHJlZGljdGlvbl9tYXJrZXQiLCJleHAiOjE3NjgzOTA5OTEsImlhdCI6MTc2ODMwNDU5MX0.UqIZjjnzfpEweeUYR2rn3UKLrzpuDNpW8uArnM1ZRPQ"
 )
 DEFAULT_DEVICE_FINGERPRINT = "1891d28b29ed0df165ecae3b7094474a"
 DEFAULT_USER_AGENT = (
@@ -133,6 +134,18 @@ def _extract_total(payload: Any) -> Optional[int]:
         return None
 
     return walk(payload)
+
+
+def _first_csv_value(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    parts = [item.strip() for item in raw.split(",") if item.strip()]
+    if not parts:
+        return None
+    return parts[0]
 
 
 def fetch_all_topics(
@@ -349,6 +362,7 @@ def merge_cached_items(raw: Any) -> List[Any]:
 
 
 def main() -> int:
+    load_dotenv()
     ap = argparse.ArgumentParser(description="Fetch Opinion frontend topic list with a Bearer token.")
     ap.add_argument("--page", type=int, default=1)
     ap.add_argument("--limit", type=int, default=12)
@@ -373,9 +387,10 @@ def main() -> int:
     ap.add_argument("--user-agent", default=os.getenv("OPINION_USER_AGENT", "").strip() or None)
     args = ap.parse_args()
 
-    auth = args.auth or DEFAULT_AUTH_TOKEN
+    auth = _first_csv_value(args.auth) or DEFAULT_AUTH_TOKEN
     if auth and not auth.startswith("Bearer "):
         auth = f"Bearer {auth}"
+    args.device_fingerprint = _first_csv_value(args.device_fingerprint)
 
     if args.merge_cached:
         cached = load_cached(args.output)

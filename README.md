@@ -63,6 +63,43 @@ TELEGRAM_CHAT_ID=-100xxxxxxxxxx
 
 ---
 
+## （可选）前端 Bearer 自动登录
+
+如果你需要调用 Opinion 前端接口（例如 `opinion_frontend_fetch.py`），可以用脚本自动登录并定时刷新 Bearer。
+
+准备一个 **小额热钱包**，私钥只放在本机 `.env`（不要上传 GitHub）。
+
+`.env` 里添加（示例）：
+
+```env
+OPINION_PRIVATE_KEY=YOUR_PRIVATE_KEY
+# 可选：多私钥（逗号分隔）
+OPINION_PRIVATE_KEYS=KEY1,KEY2
+OPINION_WALLET_ADDRESS=0xYourWallet  # 可选：不填则自动从私钥推导
+OPINION_DEVICE_FINGERPRINT=YOUR_DEVICE_FP  # 可选：不填会自动生成稳定指纹
+# 可选：多指纹（逗号分隔；只有多私钥时才需要）
+OPINION_DEVICE_FINGERPRINTS=FP1,FP2
+```
+
+单次获取并写入 `.env`：
+
+```bash
+python opinion_frontend_auth.py --once
+```
+
+常驻刷新（自动写入 `OPINION_FRONTEND_AUTH` / `OPINION_FRONTEND_TOKEN_EXPIRE`）：
+
+```bash
+nohup python opinion_frontend_auth.py >> auth.log 2>&1 &
+```
+
+多私钥时，脚本会额外写入（并把 `OPINION_FRONTEND_AUTH` / `OPINION_FRONTEND_TOKEN_EXPIRE` 写成逗号分隔列表）：
+
+- `OPINION_FRONTEND_ADDRESSES`：地址列表
+- `OPINION_FRONTEND_AUTH_<ADDR>` / `OPINION_FRONTEND_TOKEN_EXPIRE_<ADDR>` / `OPINION_DEVICE_FINGERPRINT_<ADDR>`：按地址存储
+
+---
+
 ## 使用流程（推荐顺序）
 
 ### 第一步：配置你要监控的市场（`token_registry.py`）
@@ -253,4 +290,3 @@ OPINION_API_KEYS=KEY1,KEY2
 
 - 不要把 `.env` 上传到 GitHub（里面有 API Key / Telegram Token）
 - 如果不小心泄露过 Token / Key，请立刻在对应平台撤销并重新生成
-
