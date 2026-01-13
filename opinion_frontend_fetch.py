@@ -574,6 +574,12 @@ def main() -> int:
     ap.add_argument("--depth-max-requests", type=int, default=None)
     ap.add_argument("--depth-workers", type=int, default=8)
     ap.add_argument(
+        "--depth-interval",
+        type=float,
+        default=0.0,
+        help="Seconds to sleep between depth rounds.",
+    )
+    ap.add_argument(
         "--depth-cutoff-hours",
         type=float,
         default=24.0,
@@ -613,37 +619,50 @@ def main() -> int:
         if topics_raw is None:
             print(json.dumps({"error": "topics file not found"}, ensure_ascii=True, indent=2))
             return 1
-        t0 = time.monotonic()
-        results, stats = fetch_all_depths(
-            topics_raw,
-            auth_tokens=auth_tokens,
-            device_fingerprint=args.device_fingerprint,
-            waf_token=args.waf_token,
-            user_agent=args.user_agent,
-            sleep_s=args.depth_sleep,
-            max_requests=args.depth_max_requests,
-            max_workers=args.depth_workers,
-            cutoff_hours=args.depth_cutoff_hours,
-            min_volume=args.depth_min_volume if args.depth_min_volume > 0 else None,
-        )
-        elapsed = time.monotonic() - t0
-        print(
-            json.dumps(
-                {
-                    "count": len(results),
-                    "ok": stats["ok"],
-                    "failed": stats["failed"],
-                    "skipped_cutoff": stats["skipped_cutoff"],
-                    "skipped_volume": stats["skipped_volume"],
-                    "elapsed_seconds": round(elapsed, 3),
-                    "output": args.depth_output,
-                },
-                ensure_ascii=True,
-                indent=2,
-            )
-        )
-        save_json(args.depth_output, results)
-        return 0
+        round_idx = 0
+        try:
+            while True:
+                round_idx += 1
+                t0 = time.monotonic()
+                results, stats = fetch_all_depths(
+                    topics_raw,
+                    auth_tokens=auth_tokens,
+                    device_fingerprint=args.device_fingerprint,
+                    waf_token=args.waf_token,
+                    user_agent=args.user_agent,
+                    sleep_s=args.depth_sleep,
+                    max_requests=args.depth_max_requests,
+                    max_workers=args.depth_workers,
+                    cutoff_hours=args.depth_cutoff_hours,
+                    min_volume=args.depth_min_volume if args.depth_min_volume > 0 else None,
+                )
+                elapsed = time.monotonic() - t0
+                total = stats["ok"] + stats["failed"]
+                success_rate = round((stats["ok"] / total) if total else 0.0, 4)
+                ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                print(
+                    json.dumps(
+                        {
+                            "timestamp": ts,
+                            "round": round_idx,
+                            "count": len(results),
+                            "ok": stats["ok"],
+                            "failed": stats["failed"],
+                            "success_rate": success_rate,
+                            "skipped_cutoff": stats["skipped_cutoff"],
+                            "skipped_volume": stats["skipped_volume"],
+                            "elapsed_seconds": round(elapsed, 3),
+                            "output": args.depth_output,
+                        },
+                        ensure_ascii=True,
+                        indent=2,
+                    )
+                )
+                if args.depth_interval and args.depth_interval > 0:
+                    time.sleep(args.depth_interval)
+        except KeyboardInterrupt:
+            print(json.dumps({"stopped": True}, ensure_ascii=True, indent=2))
+            return 0
 
     if not args.refresh:
         cached = load_cached(args.output)
