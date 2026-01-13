@@ -501,6 +501,16 @@ def ffloat(val: Any) -> Optional[float]:
     return _as_float(val)
 
 
+def _extract_level(entry: Any) -> Tuple[Any, Any]:
+    if isinstance(entry, dict):
+        return entry.get("price"), entry.get("size")
+    if isinstance(entry, (list, tuple)) and entry:
+        price = entry[0]
+        size = entry[1] if len(entry) > 1 else None
+        return price, size
+    return None, None
+
+
 def parse_best_bid_ask(book: Dict[str, Any]) -> Dict[str, Optional[float]]:
     if not isinstance(book, dict):
         return {
@@ -521,22 +531,24 @@ def parse_best_bid_ask(book: Dict[str, Any]) -> Dict[str, Optional[float]]:
     best_bid = None
     best_bid_size = None
     for x in bids:
-        p = ffloat(x.get("price"))
+        price, size = _extract_level(x)
+        p = ffloat(price)
         if p is None:
             continue
         if (best_bid is None) or (p > best_bid):
             best_bid = p
-            best_bid_size = ffloat(x.get("size"))
+            best_bid_size = ffloat(size)
 
     best_ask = None
     best_ask_size = None
     for x in asks:
-        p = ffloat(x.get("price"))
+        price, size = _extract_level(x)
+        p = ffloat(price)
         if p is None:
             continue
         if (best_ask is None) or (p < best_ask):
             best_ask = p
-            best_ask_size = ffloat(x.get("size"))
+            best_ask_size = ffloat(size)
 
     return {
         "best_bid": best_bid,
@@ -613,17 +625,24 @@ def _complement_price(val: Any) -> Optional[float]:
     return float(complement)
 
 
-def _mirror_levels(levels: Iterable[Any]) -> List[Dict[str, Any]]:
-    mirrored: List[Dict[str, Any]] = []
+def _mirror_levels(levels: Iterable[Any]) -> List[Any]:
+    mirrored: List[Any] = []
     for entry in levels:
-        if not isinstance(entry, dict):
+        if isinstance(entry, dict):
+            price = _complement_price(entry.get("price"))
+            if price is None:
+                continue
+            new_entry = dict(entry)
+            new_entry["price"] = price
+            mirrored.append(new_entry)
             continue
-        price = _complement_price(entry.get("price"))
-        if price is None:
-            continue
-        new_entry = dict(entry)
-        new_entry["price"] = price
-        mirrored.append(new_entry)
+        if isinstance(entry, (list, tuple)) and entry:
+            price = _complement_price(entry[0])
+            if price is None:
+                continue
+            new_entry = list(entry)
+            new_entry[0] = price
+            mirrored.append(new_entry)
     return mirrored
 
 
