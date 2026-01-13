@@ -348,6 +348,24 @@ def _choose_auth_token(
     return DEFAULT_AUTH_TOKEN
 
 
+def _pick_worker_value(values: Optional[Sequence[str]], worker_idx: int) -> Optional[str]:
+    if not values:
+        return None
+    return values[worker_idx % len(values)]
+
+
+def _pick_worker_auth(
+    auth_token: Optional[str],
+    auth_tokens: Optional[Sequence[str]],
+    worker_idx: int,
+) -> str:
+    if auth_tokens:
+        return auth_tokens[worker_idx % len(auth_tokens)]
+    if auth_token:
+        return auth_token
+    return DEFAULT_AUTH_TOKEN
+
+
 def fetch_all_topics(
     start_page: int = 1,
     limit: int = 12,
@@ -727,6 +745,7 @@ async def fetch_all_depths(
     auth_token: Optional[str] = None,
     auth_tokens: Optional[Sequence[str]] = None,
     device_fingerprint: Optional[str] = None,
+    device_fingerprints: Optional[Sequence[str]] = None,
     waf_token: Optional[str] = None,
     user_agent: Optional[str] = None,
     sleep_s: float = 0.0,
@@ -808,7 +827,6 @@ async def fetch_all_depths(
     error_samples: List[Dict[str, Any]] = []
 
     workers = max(1, int(max_workers))
-    sem = asyncio.Semaphore(workers)
 
     def _build_result(
         task: Dict[str, Any],
@@ -837,26 +855,36 @@ async def fetch_all_depths(
             result["error"] = error
         return result
 
-    async def _run(
-        task: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Exception], float]:
-        async with sem:
+    async def _worker(worker_idx: int) -> None:
+        worker_auth = _pick_worker_auth(auth_token, auth_tokens, worker_idx)
+        worker_fp = _pick_worker_value(device_fingerprints, worker_idx) or device_fingerprint
+        while True:
+            task = await task_queue.get()
+            if task is None:
+                task_queue.task_done()
+                break
+            t_start = time.monotonic()
+            err: Optional[Exception] = None
+            payload: Optional[Dict[str, Any]] = None
             try:
-                t_start = time.monotonic()
                 payload = await fetch_market_depth_async(
                     question_id=task["questionId"],
                     symbol=task["symbol"],
                     symbol_types=task["symbol_types"],
                     session=session,
-                    auth_token=auth_token,
-                    auth_tokens=auth_tokens,
-                    device_fingerprint=device_fingerprint,
+                    auth_token=worker_auth,
+                    auth_tokens=None,
+                    device_fingerprint=worker_fp,
                     waf_token=waf_token,
                     user_agent=user_agent,
                 )
-                t_end = time.monotonic()
-                if sleep_s > 0:
-                    await asyncio.sleep(sleep_s)
+            except Exception as exc:
+                err = exc
+            t_end = time.monotonic()
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
+
+            if err is None and payload is not None:
                 primary = _build_result(
                     task,
                     side=task["side"],
@@ -885,36 +913,27 @@ async def fetch_all_depths(
                         response=mirrored,
                         derived=True,
                     )
-                return (primary, derived, None, (t_end - t_start) * 1000.0)
-            except Exception as exc:
-                t_end = time.monotonic()
-                return (
-                    _build_result(
-                        task,
-                        side=task["side"],
-                        symbol=task["symbol"],
-                        symbol_types=task["symbol_types"],
-                        error=str(exc),
-                    ),
-                    None,
-                    exc,
-                    (t_end - t_start) * 1000.0,
+            else:
+                primary = _build_result(
+                    task,
+                    side=task["side"],
+                    symbol=task["symbol"],
+                    symbol_types=task["symbol_types"],
+                    error=str(err) if err is not None else "unknown error",
                 )
+                derived = None
 
-    if tasks:
-        coros = [_run(t) for t in tasks]
-        for fut in asyncio.as_completed(coros):
-            result, derived, err, latency_ms = await fut
-            results.append(result)
+            results.append(primary)
             if derived is not None:
                 results.append(derived)
+            latency_ms = (t_end - t_start) * 1000.0
             latencies_ms.append(latency_ms)
             latency_samples.append(
                 {
                     "latency_ms": latency_ms,
-                    "topicId": result.get("topicId"),
-                    "symbol": result.get("symbol"),
-                    "side": result.get("side"),
+                    "topicId": primary.get("topicId"),
+                    "symbol": primary.get("symbol"),
+                    "side": primary.get("side"),
                 }
             )
             if err is None:
@@ -924,12 +943,25 @@ async def fetch_all_depths(
                 if len(error_samples) < 50:
                     error_samples.append(
                         {
-                            "topicId": result.get("topicId"),
-                            "symbol": result.get("symbol"),
-                            "side": result.get("side"),
-                            "error": result.get("error") or str(err),
+                            "topicId": primary.get("topicId"),
+                            "symbol": primary.get("symbol"),
+                            "side": primary.get("side"),
+                            "error": primary.get("error") or str(err),
                         }
                     )
+            task_queue.task_done()
+
+    if tasks:
+        task_queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+        for task in tasks:
+            task_queue.put_nowait(task)
+        for _ in range(workers):
+            task_queue.put_nowait(None)
+
+        worker_tasks = [asyncio.create_task(_worker(i)) for i in range(workers)]
+        await task_queue.join()
+        for wt in worker_tasks:
+            await wt
 
     stats["latency_ms"] = _summarize_latencies_ms(latencies_ms)
     latency_samples.sort(key=lambda x: x["latency_ms"], reverse=True)
@@ -1018,14 +1050,19 @@ def main() -> int:
     ap.add_argument("--auth", default=os.getenv("OPINION_FRONTEND_AUTH", "").strip() or None)
     ap.add_argument(
         "--device-fingerprint",
-        default=os.getenv("OPINION_DEVICE_FINGERPRINT", "").strip() or None,
+        default=(
+            os.getenv("OPINION_DEVICE_FINGERPRINTS", "").strip()
+            or os.getenv("OPINION_DEVICE_FINGERPRINT", "").strip()
+            or None
+        ),
     )
     ap.add_argument("--waf-token", default=os.getenv("OPINION_WAF_TOKEN", "").strip() or None)
     ap.add_argument("--user-agent", default=os.getenv("OPINION_USER_AGENT", "").strip() or None)
     args = ap.parse_args()
 
     auth_tokens = _normalize_auth_tokens(args.auth)
-    args.device_fingerprint = _first_csv_value(args.device_fingerprint)
+    device_fingerprints = _split_csv_values(args.device_fingerprint)
+    device_fingerprint = device_fingerprints[0] if device_fingerprints else None
 
     if args.merge_cached:
         cached = load_cached(args.output)
@@ -1053,7 +1090,8 @@ def main() -> int:
                         topics_raw,
                         session=session,
                         auth_tokens=auth_tokens,
-                        device_fingerprint=args.device_fingerprint,
+                        device_fingerprint=device_fingerprint,
+                        device_fingerprints=device_fingerprints,
                         waf_token=args.waf_token,
                         user_agent=args.user_agent,
                         sleep_s=args.depth_sleep,
@@ -1128,7 +1166,7 @@ def main() -> int:
             page=args.page,
             limit=args.limit,
             auth_tokens=auth_tokens,
-            device_fingerprint=args.device_fingerprint,
+            device_fingerprint=device_fingerprint,
             waf_token=args.waf_token,
             user_agent=args.user_agent,
         )
@@ -1138,7 +1176,7 @@ def main() -> int:
             limit=args.limit,
             max_pages=args.max_pages,
             auth_tokens=auth_tokens,
-            device_fingerprint=args.device_fingerprint,
+            device_fingerprint=device_fingerprint,
             waf_token=args.waf_token,
             user_agent=args.user_agent,
         )
