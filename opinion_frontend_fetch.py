@@ -374,6 +374,7 @@ def fetch_all_depths(
 
 def merge_cached_items(raw: Any) -> List[Any]:
     items: List[Any] = []
+    found_items = False
 
     if isinstance(raw, list):
         if raw and all(not isinstance(x, dict) for x in raw):
@@ -381,12 +382,15 @@ def merge_cached_items(raw: Any) -> List[Any]:
         for page in raw:
             if isinstance(page, list):
                 items.extend(page)
+                found_items = True
                 continue
             if isinstance(page, (dict, list)):
-                batch, _ = _extract_items(page)
+                batch, parent = _extract_items(page)
+                if parent or isinstance(page, list):
+                    found_items = True
                 if batch:
                     items.extend(batch)
-        if not items and all(isinstance(x, dict) for x in raw):
+        if not items and all(isinstance(x, dict) for x in raw) and not found_items:
             return raw
         return items
 
@@ -472,7 +476,10 @@ def main() -> int:
     if not args.refresh:
         cached = load_cached(args.output)
         if cached is not None:
-            print(json.dumps(cached, ensure_ascii=True, indent=2))
+            merged = merge_cached_items(cached)
+            if merged is not cached:
+                save_json(args.output, merged)
+            print(json.dumps(merged, ensure_ascii=True, indent=2))
             return 0
 
     if args.single_page:
@@ -494,8 +501,9 @@ def main() -> int:
             waf_token=args.waf_token,
             user_agent=args.user_agent,
         )
-    save_json(args.output, data)
-    print(json.dumps(data, ensure_ascii=True, indent=2))
+    merged = merge_cached_items(data)
+    save_json(args.output, merged)
+    print(json.dumps(merged, ensure_ascii=True, indent=2))
     return 0
 
 
