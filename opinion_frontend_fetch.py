@@ -2,9 +2,10 @@
 import argparse
 import json
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Optional, Tuple, List, Iterable
+from typing import Any, Dict, Optional, Tuple, List, Iterable, Sequence
 
 import requests
 from dotenv import load_dotenv
@@ -60,6 +61,7 @@ def fetch_topic_page(
     page: int = 5,
     limit: int = 12,
     auth_token: Optional[str] = None,
+    auth_tokens: Optional[Sequence[str]] = None,
     device_fingerprint: Optional[str] = None,
     waf_token: Optional[str] = None,
     user_agent: Optional[str] = None,
@@ -78,7 +80,7 @@ def fetch_topic_page(
         "excludePin": 1,
     }
     headers = _build_headers(
-        auth_token or DEFAULT_AUTH_TOKEN,
+        _choose_auth_token(auth_token, auth_tokens),
         device_fingerprint or DEFAULT_DEVICE_FINGERPRINT,
         waf_token or "",
         user_agent or DEFAULT_USER_AGENT,
@@ -148,11 +150,41 @@ def _first_csv_value(raw: Optional[str]) -> Optional[str]:
     return parts[0]
 
 
+def _split_csv_values(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    parts = [item.strip() for item in raw.split(",") if item.strip()]
+    return parts
+
+
+def _normalize_auth_tokens(raw: Optional[str]) -> List[str]:
+    tokens = _split_csv_values(raw)
+    normalized: List[str] = []
+    for token in tokens:
+        if token.startswith("Bearer "):
+            normalized.append(token)
+        else:
+            normalized.append(f"Bearer {token}")
+    return normalized
+
+
+def _choose_auth_token(
+    auth_token: Optional[str],
+    auth_tokens: Optional[Sequence[str]],
+) -> str:
+    if auth_tokens:
+        return random.choice(auth_tokens)
+    if auth_token:
+        return auth_token
+    return DEFAULT_AUTH_TOKEN
+
+
 def fetch_all_topics(
     start_page: int = 1,
     limit: int = 12,
     max_pages: Optional[int] = None,
     auth_token: Optional[str] = None,
+    auth_tokens: Optional[Sequence[str]] = None,
     device_fingerprint: Optional[str] = None,
     waf_token: Optional[str] = None,
     user_agent: Optional[str] = None,
@@ -167,6 +199,7 @@ def fetch_all_topics(
             page=page,
             limit=limit,
             auth_token=auth_token,
+            auth_tokens=auth_tokens,
             device_fingerprint=device_fingerprint,
             waf_token=waf_token,
             user_agent=user_agent,
@@ -194,6 +227,7 @@ def fetch_market_depth(
     symbol: str,
     symbol_types: int,
     auth_token: Optional[str] = None,
+    auth_tokens: Optional[Sequence[str]] = None,
     device_fingerprint: Optional[str] = None,
     waf_token: Optional[str] = None,
     user_agent: Optional[str] = None,
@@ -205,7 +239,7 @@ def fetch_market_depth(
         "chainId": 56,
     }
     headers = _build_headers(
-        auth_token or DEFAULT_AUTH_TOKEN,
+        _choose_auth_token(auth_token, auth_tokens),
         device_fingerprint or DEFAULT_DEVICE_FINGERPRINT,
         waf_token or "",
         user_agent or DEFAULT_USER_AGENT,
@@ -249,6 +283,7 @@ def _as_str(val: Any) -> str:
 def fetch_all_depths(
     topics_raw: Any,
     auth_token: Optional[str] = None,
+    auth_tokens: Optional[Sequence[str]] = None,
     device_fingerprint: Optional[str] = None,
     waf_token: Optional[str] = None,
     user_agent: Optional[str] = None,
@@ -295,6 +330,7 @@ def fetch_all_depths(
             symbol=task["symbol"],
             symbol_types=task["symbol_types"],
             auth_token=auth_token,
+            auth_tokens=auth_tokens,
             device_fingerprint=device_fingerprint,
             waf_token=waf_token,
             user_agent=user_agent,
@@ -387,9 +423,7 @@ def main() -> int:
     ap.add_argument("--user-agent", default=os.getenv("OPINION_USER_AGENT", "").strip() or None)
     args = ap.parse_args()
 
-    auth = _first_csv_value(args.auth) or DEFAULT_AUTH_TOKEN
-    if auth and not auth.startswith("Bearer "):
-        auth = f"Bearer {auth}"
+    auth_tokens = _normalize_auth_tokens(args.auth)
     args.device_fingerprint = _first_csv_value(args.device_fingerprint)
 
     if args.merge_cached:
@@ -410,7 +444,7 @@ def main() -> int:
         t0 = time.monotonic()
         results, stats = fetch_all_depths(
             topics_raw,
-            auth_token=auth,
+            auth_tokens=auth_tokens,
             device_fingerprint=args.device_fingerprint,
             waf_token=args.waf_token,
             user_agent=args.user_agent,
@@ -445,7 +479,7 @@ def main() -> int:
         data: Any = fetch_topic_page(
             page=args.page,
             limit=args.limit,
-            auth_token=auth,
+            auth_tokens=auth_tokens,
             device_fingerprint=args.device_fingerprint,
             waf_token=args.waf_token,
             user_agent=args.user_agent,
@@ -455,7 +489,7 @@ def main() -> int:
             start_page=args.page,
             limit=args.limit,
             max_pages=args.max_pages,
-            auth_token=auth,
+            auth_tokens=auth_tokens,
             device_fingerprint=args.device_fingerprint,
             waf_token=args.waf_token,
             user_agent=args.user_agent,
