@@ -81,6 +81,7 @@ class MarketMaker:
         self.log_state_changes = bool(log_cfg.get("log_state_changes", True))
         self.log_order_params = bool(log_cfg.get("log_order_params", True))
         self.log_decisions = bool(log_cfg.get("log_decisions", True))
+        self.loop_count = 0
 
         self.state_path = (config.get("state") or {}).get("file", "mm_state.json")
         self.state = load_state(self.state_path)
@@ -551,6 +552,13 @@ class MarketMaker:
         quote_cfg = self.config.get("quote", {})
         risk_cfg = self.config.get("risk", {})
         sync_cfg = self.config.get("order_sync", {})
+        try:
+            sync_every = int(sync_cfg.get("interval_loops", 1))
+        except (TypeError, ValueError):
+            sync_every = 1
+        if sync_every < 1:
+            sync_every = 1
+        do_sync = bool(sync_cfg.get("enabled", False)) and (self.loop_count % sync_every == 0)
 
         level = int(quote_cfg.get("orderbook_level", 5))
         size = float(quote_cfg.get("size_per_side", 10.0))
@@ -587,7 +595,8 @@ class MarketMaker:
                     self.logger.info("skip market=%s reason=missing_token_id", market_id)
                 continue
 
-            self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
+            if do_sync:
+                self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
 
             t0 = time.perf_counter()
             try:
@@ -771,6 +780,7 @@ class MarketMaker:
                 self.state_path,
                 len(self.state.get("orders", {})),
             )
+        self.loop_count += 1
 
     def run_forever(self) -> None:
         interval = int((self.config.get("runtime") or {}).get("loop_interval_seconds", 3))
