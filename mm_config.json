@@ -4,17 +4,18 @@
     "output_file": "selected_markets.json",
     "market_pairs_file": "market_token_pairs.json",
     "require_market_pairs": false,
+    "auto_run_on_missing": false,
     "price_target": 0.5,
-    "price_tolerance": 0.05,
+    "price_tolerance": 0.2,
     "volume_percentile_min": 0.1,
     "volume_percentile_max": 0.3,
-    "max_markets": 12
+    "max_markets": 2
   },
   "market_switch": {
-    "enabled": true,
+    "enabled": false,
     "interval_seconds": 3600,
     "cancel_all_on_switch": true,
-    "run_selector_on_switch": true
+    "run_selector_on_switch": false
   },
   "quote": {
     "price_source": "orderbook_level",

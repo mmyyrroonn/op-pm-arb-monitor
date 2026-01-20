@@ -1,0 +1,287 @@
+{
+  "nodes": [
+    {
+      "id": "0f1a2b3c4d5e6f70",
+      "type": "group",
+      "x": -60,
+      "y": -60,
+      "width": 460,
+      "height": 660,
+      "label": "Initialization",
+      "color": "4"
+    },
+    {
+      "id": "1f2a3b4c5d6e7f80",
+      "type": "group",
+      "x": -60,
+      "y": 620,
+      "width": 1060,
+      "height": 780,
+      "label": "Main Loop",
+      "color": "5"
+    },
+    {
+      "id": "a1b2c3d4e5f60718",
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 200,
+      "height": 60,
+      "text": "**Start**\n`scripts/run_mm.py`",
+      "color": "4"
+    },
+    {
+      "id": "b2c3d4e5f6071829",
+      "type": "text",
+      "x": 0,
+      "y": 90,
+      "width": 260,
+      "height": 70,
+      "text": "Load config\n`mm_config.json` + env secrets"
+    },
+    {
+      "id": "c3d4e5f60718293a",
+      "type": "text",
+      "x": 0,
+      "y": 180,
+      "width": 260,
+      "height": 70,
+      "text": "Load state\n`mm_state.json`"
+    },
+    {
+      "id": "d4e5f60718293a4b",
+      "type": "text",
+      "x": 0,
+      "y": 270,
+      "width": 320,
+      "height": 70,
+      "text": "Init order executor\n`OpinionOrderExecutor`"
+    },
+    {
+      "id": "e5f60718293a4b5c",
+      "type": "text",
+      "x": 0,
+      "y": 360,
+      "width": 320,
+      "height": 80,
+      "text": "Init data client\nOpenAPI or Frontend"
+    },
+    {
+      "id": "f60718293a4b5c6d",
+      "type": "text",
+      "x": 0,
+      "y": 460,
+      "width": 360,
+      "height": 90,
+      "text": "Load or select markets\n`selected_markets.json` or run selector"
+    },
+    {
+      "id": "0718293a4b5c6d7e",
+      "type": "text",
+      "x": 0,
+      "y": 570,
+      "width": 300,
+      "height": 60,
+      "text": "Set market switch schedule"
+    },
+    {
+      "id": "18293a4b5c6d7e8f",
+      "type": "text",
+      "x": 0,
+      "y": 700,
+      "width": 220,
+      "height": 60,
+      "text": "**Loop tick**\ninterval"
+    },
+    {
+      "id": "293a4b5c6d7e8f90",
+      "type": "text",
+      "x": 0,
+      "y": 780,
+      "width": 220,
+      "height": 70,
+      "text": "**Decision**\nSwitch markets now?",
+      "color": "3"
+    },
+    {
+      "id": "3a4b5c6d7e8f9011",
+      "type": "text",
+      "x": 260,
+      "y": 760,
+      "width": 360,
+      "height": 100,
+      "text": "Run selector (optional)\nLoad new `selected_markets.json`\nCancel all if changed"
+    },
+    {
+      "id": "4b5c6d7e8f901122",
+      "type": "text",
+      "x": 0,
+      "y": 870,
+      "width": 260,
+      "height": 70,
+      "text": "Load quote + risk params"
+    },
+    {
+      "id": "5c6d7e8f90112233",
+      "type": "text",
+      "x": 0,
+      "y": 950,
+      "width": 220,
+      "height": 70,
+      "text": "**Decision**\nsize >= min_size?",
+      "color": "3"
+    },
+    {
+      "id": "6d7e8f9011223344",
+      "type": "text",
+      "x": 0,
+      "y": 1030,
+      "width": 520,
+      "height": 200,
+      "text": "**Per Market**\n- select token side (yes/no)\n- fetch orderbook (OpenAPI/Frontend)\n- best bid/ask + price at level\n- validate prices\n- reference price\n- update buy/sell orders (cancel/replace)"
+    },
+    {
+      "id": "7e8f901122334455",
+      "type": "text",
+      "x": 0,
+      "y": 1240,
+      "width": 240,
+      "height": 60,
+      "text": "Save state\n`mm_state.json`"
+    },
+    {
+      "id": "8f90112233445566",
+      "type": "text",
+      "x": 0,
+      "y": 1310,
+      "width": 200,
+      "height": 60,
+      "text": "Sleep interval"
+    }
+  ],
+  "edges": [
+    {
+      "id": "aa11bb22cc33dd44",
+      "fromNode": "a1b2c3d4e5f60718",
+      "fromSide": "bottom",
+      "toNode": "b2c3d4e5f6071829",
+      "toSide": "top"
+    },
+    {
+      "id": "bb22cc33dd44ee55",
+      "fromNode": "b2c3d4e5f6071829",
+      "fromSide": "bottom",
+      "toNode": "c3d4e5f60718293a",
+      "toSide": "top"
+    },
+    {
+      "id": "cc33dd44ee55ff66",
+      "fromNode": "c3d4e5f60718293a",
+      "fromSide": "bottom",
+      "toNode": "d4e5f60718293a4b",
+      "toSide": "top"
+    },
+    {
+      "id": "dd44ee55ff667788",
+      "fromNode": "d4e5f60718293a4b",
+      "fromSide": "bottom",
+      "toNode": "e5f60718293a4b5c",
+      "toSide": "top"
+    },
+    {
+      "id": "ee55ff6677889900",
+      "fromNode": "e5f60718293a4b5c",
+      "fromSide": "bottom",
+      "toNode": "f60718293a4b5c6d",
+      "toSide": "top"
+    },
+    {
+      "id": "ff6677889900aa11",
+      "fromNode": "f60718293a4b5c6d",
+      "fromSide": "bottom",
+      "toNode": "0718293a4b5c6d7e",
+      "toSide": "top"
+    },
+    {
+      "id": "006677889900aa22",
+      "fromNode": "0718293a4b5c6d7e",
+      "fromSide": "bottom",
+      "toNode": "18293a4b5c6d7e8f",
+      "toSide": "top"
+    },
+    {
+      "id": "116677889900aa33",
+      "fromNode": "18293a4b5c6d7e8f",
+      "fromSide": "bottom",
+      "toNode": "293a4b5c6d7e8f90",
+      "toSide": "top"
+    },
+    {
+      "id": "226677889900aa44",
+      "fromNode": "293a4b5c6d7e8f90",
+      "fromSide": "right",
+      "toNode": "3a4b5c6d7e8f9011",
+      "toSide": "left",
+      "label": "Yes"
+    },
+    {
+      "id": "336677889900aa55",
+      "fromNode": "293a4b5c6d7e8f90",
+      "fromSide": "bottom",
+      "toNode": "4b5c6d7e8f901122",
+      "toSide": "top",
+      "label": "No"
+    },
+    {
+      "id": "446677889900aa66",
+      "fromNode": "3a4b5c6d7e8f9011",
+      "fromSide": "bottom",
+      "toNode": "4b5c6d7e8f901122",
+      "toSide": "right"
+    },
+    {
+      "id": "556677889900aa77",
+      "fromNode": "4b5c6d7e8f901122",
+      "fromSide": "bottom",
+      "toNode": "5c6d7e8f90112233",
+      "toSide": "top"
+    },
+    {
+      "id": "666677889900aa88",
+      "fromNode": "5c6d7e8f90112233",
+      "fromSide": "bottom",
+      "toNode": "6d7e8f9011223344",
+      "toSide": "top",
+      "label": "Yes"
+    },
+    {
+      "id": "776677889900aa99",
+      "fromNode": "5c6d7e8f90112233",
+      "fromSide": "left",
+      "toNode": "8f90112233445566",
+      "toSide": "left",
+      "label": "No"
+    },
+    {
+      "id": "886677889900aabb",
+      "fromNode": "6d7e8f9011223344",
+      "fromSide": "bottom",
+      "toNode": "7e8f901122334455",
+      "toSide": "top"
+    },
+    {
+      "id": "996677889900aacc",
+      "fromNode": "7e8f901122334455",
+      "fromSide": "bottom",
+      "toNode": "8f90112233445566",
+      "toSide": "top"
+    },
+    {
+      "id": "aa6677889900aadd",
+      "fromNode": "8f90112233445566",
+      "fromSide": "bottom",
+      "toNode": "18293a4b5c6d7e8f",
+      "toSide": "left"
+    }
+  ]
+}

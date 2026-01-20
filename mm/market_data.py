@@ -1,5 +1,6 @@
+import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -37,6 +38,13 @@ def _normalize_book(book: Dict[str, Any]) -> Dict[str, Any]:
     return {"bids": bids, "asks": asks}
 
 
+def _split_csv(raw: str) -> List[str]:
+    if not raw:
+        return []
+    cleaned = raw.replace(",", " ")
+    return [item for item in cleaned.split() if item]
+
+
 class OpinionOpenApiClient:
     def __init__(self, host: str, api_key: str, min_interval: float, timeout: float) -> None:
         self.host = host.rstrip("/")
@@ -66,23 +74,62 @@ class OpinionFrontendClient:
         auth_token: str,
         device_fingerprint: str,
         waf_token: str = "",
+        auth_mode: str = "random",
     ) -> None:
-        self.auth_token = auth_token
-        self.device_fingerprint = device_fingerprint
+        self.auth_tokens = _split_csv(auth_token)
+        self.device_fingerprints = _split_csv(device_fingerprint)
         self.waf_token = waf_token
+        self.auth_mode = (auth_mode or "random").lower()
+        self._rr_index = 0
+        self._warned_fp_mismatch = False
 
     def fetch_orderbook(
         self,
         question_id: str,
         symbol: str,
         symbol_types: int,
+        worker_idx: Optional[int] = None,
     ) -> Dict[str, Any]:
+        auth_token, device_fingerprint = self._pick_auth(worker_idx)
         data = fetch_market_depth(
             question_id=question_id,
             symbol=symbol,
             symbol_types=symbol_types,
-            auth_token=self.auth_token,
-            device_fingerprint=self.device_fingerprint,
+            auth_token=auth_token,
+            device_fingerprint=device_fingerprint,
             waf_token=self.waf_token,
         )
         return _normalize_book(data)
+
+    def _pick_auth(self, worker_idx: Optional[int]) -> Tuple[str, str]:
+        if not self.auth_tokens:
+            return "", self.device_fingerprints[0] if self.device_fingerprints else ""
+
+        idx = 0
+        if len(self.auth_tokens) > 1:
+            mode = self.auth_mode
+            if mode in ("worker", "worker_round_robin", "worker_rr"):
+                if worker_idx is not None:
+                    idx = worker_idx % len(self.auth_tokens)
+                else:
+                    idx = self._rr_index % len(self.auth_tokens)
+                    self._rr_index += 1
+            elif mode in ("round_robin", "rr"):
+                idx = self._rr_index % len(self.auth_tokens)
+                self._rr_index += 1
+            else:
+                idx = random.randrange(len(self.auth_tokens))
+
+        token = self.auth_tokens[idx]
+        fp = ""
+        if self.device_fingerprints:
+            if len(self.device_fingerprints) == 1:
+                fp = self.device_fingerprints[0]
+            elif len(self.device_fingerprints) == len(self.auth_tokens):
+                fp = self.device_fingerprints[idx]
+            else:
+                fp = self.device_fingerprints[0]
+                if not self._warned_fp_mismatch:
+                    print("[WARN] frontend device fingerprints count mismatch; using first fingerprint")
+                    self._warned_fp_mismatch = True
+        return token, fp

@@ -57,7 +57,8 @@ class MarketMaker:
             auth = resolve_secret(data_cfg, "frontend_auth", data_cfg.get("frontend_auth_env", ""))
             device_fp = resolve_secret(data_cfg, "frontend_device_fp", data_cfg.get("frontend_device_fp_env", ""))
             waf = resolve_secret(data_cfg, "frontend_waf", data_cfg.get("frontend_waf_env", ""))
-            self.data_client = OpinionFrontendClient(auth, device_fp, waf)
+            auth_mode = str(data_cfg.get("frontend_auth_mode", "random"))
+            self.data_client = OpinionFrontendClient(auth, device_fp, waf, auth_mode=auth_mode)
         else:
             min_interval = float(op_cfg.get("http_min_interval", 0.2))
             timeout = float(op_cfg.get("http_timeout_seconds", 15))
@@ -81,10 +82,16 @@ class MarketMaker:
     def _load_or_select_markets(self) -> None:
         selector_cfg = self.config.get("market_selector", {})
         output_file = selector_cfg.get("output_file", "selected_markets.json")
+        auto_run = bool(selector_cfg.get("auto_run_on_missing", False))
         try:
             self.markets = _load_json(output_file)
         except FileNotFoundError:
-            self.markets = select_and_write(self.config)
+            if auto_run:
+                self.markets = select_and_write(self.config)
+                return
+            raise RuntimeError(
+                f"Missing {output_file}. Run scripts/run_market_selector.py to generate it."
+            )
 
     def _maybe_switch_markets(self) -> None:
         if not self.switch_enabled:
@@ -186,7 +193,7 @@ class MarketMaker:
         if size < min_size:
             return
 
-        for market in self.markets:
+        for idx, market in enumerate(self.markets):
             market_id = int(market.get("topicId"))
             token_id, _side_label, symbol_types = self._select_token(market)
             if not token_id:
@@ -201,6 +208,7 @@ class MarketMaker:
                         question_id=str(question_id),
                         symbol=str(token_id),
                         symbol_types=symbol_types,
+                        worker_idx=idx,
                     )
                 else:
                     book = self.data_client.fetch_orderbook(str(token_id))
