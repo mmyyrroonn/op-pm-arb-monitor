@@ -21,8 +21,8 @@
     "price_source": "orderbook_level",
     "orderbook_level": 5,
     "token_side": "yes",
-    "size_per_side": 0.2,
-    "min_size": 0.2,
+    "size_per_side": 1,
+    "min_size": 1,
     "replace_bps": 5.0
   },
   "risk": {

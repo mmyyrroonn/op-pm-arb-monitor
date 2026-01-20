@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _extract_level(entry: Any) -> Tuple[Optional[float], Optional[float]]:
@@ -18,47 +18,48 @@ def _to_float(val: Any) -> Optional[float]:
         return None
 
 
+def _sorted_levels(book: Dict[str, Any], side: str) -> List[Tuple[float, Optional[float]]]:
+    levels = book.get("bids") if side == "bid" else book.get("asks")
+    if not levels:
+        return []
+    parsed: List[Tuple[float, Optional[float]]] = []
+    for entry in levels:
+        price, size = _extract_level(entry)
+        if price is None:
+            continue
+        parsed.append((price, size))
+    parsed.sort(key=lambda item: item[0], reverse=(side == "bid"))
+    return parsed
+
+
 def best_bid_ask(book: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
-    bids = book.get("bids") or []
-    asks = book.get("asks") or []
-    best_bid = None
-    for entry in bids:
-        price, _ = _extract_level(entry)
-        if price is None:
-            continue
-        if best_bid is None or price > best_bid:
-            best_bid = price
-    best_ask = None
-    for entry in asks:
-        price, _ = _extract_level(entry)
-        if price is None:
-            continue
-        if best_ask is None or price < best_ask:
-            best_ask = price
+    bids = _sorted_levels(book, "bid")
+    asks = _sorted_levels(book, "ask")
+    best_bid = bids[0][0] if bids else None
+    best_ask = asks[0][0] if asks else None
     return best_bid, best_ask
 
 
 def price_at_level(book: Dict[str, Any], side: str, level: int) -> Optional[float]:
     if level <= 0:
         return None
-    levels = book.get("bids") if side == "bid" else book.get("asks")
+    levels = _sorted_levels(book, side)
     if not levels:
         return None
     idx = min(level - 1, len(levels) - 1)
-    price, _ = _extract_level(levels[idx])
-    return price
+    return levels[idx][0]
 
 
 def depth_at_levels(book: Dict[str, Any], side: str, level: int) -> Optional[float]:
     if level <= 0:
         return None
-    levels = book.get("bids") if side == "bid" else book.get("asks")
+    levels = _sorted_levels(book, side)
     if not levels:
         return None
     total = 0.0
     saw_size = False
     for idx in range(min(level, len(levels))):
-        _, size = _extract_level(levels[idx])
+        _, size = levels[idx]
         qty = _to_float(size)
         if qty is None:
             continue
