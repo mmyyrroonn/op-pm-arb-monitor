@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,11 +31,60 @@ def _reference_price(reference: str, best_bid: Optional[float], best_ask: Option
     return best_bid or best_ask
 
 
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_float(value: Optional[float], decimals: int = 6) -> str:
+    if value is None:
+        return "None"
+    return f"{value:.{decimals}f}"
+
+
+def _logging_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    raw = config.get("logging", {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def _setup_logger(config: Dict[str, Any]) -> logging.Logger:
+    log_cfg = _logging_config(config)
+    logger = logging.getLogger("mm.engine")
+    if getattr(logger, "_configured", False):
+        return logger
+    level_name = str(log_cfg.get("level", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logger.setLevel(level)
+    handler = logging.StreamHandler()
+    fmt = log_cfg.get("format", "%(asctime)s [%(levelname)s] %(message)s")
+    datefmt = log_cfg.get("datefmt", "%Y-%m-%d %H:%M:%S")
+    handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+    logger.addHandler(handler)
+    logger.propagate = False
+    logger.disabled = not bool(log_cfg.get("enabled", True))
+    setattr(logger, "_configured", True)
+    return logger
+
+
 class MarketMaker:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
+        log_cfg = _logging_config(config)
+        self.logger = _setup_logger(config)
+        self.log_orderbook = bool(log_cfg.get("log_orderbook", True))
+        self.log_state_changes = bool(log_cfg.get("log_state_changes", True))
+        self.log_order_params = bool(log_cfg.get("log_order_params", True))
+        self.log_decisions = bool(log_cfg.get("log_decisions", True))
+
         self.state_path = (config.get("state") or {}).get("file", "mm_state.json")
         self.state = load_state(self.state_path)
+        self.logger.info(
+            "state loaded path=%s orders=%d",
+            self.state_path,
+            len(self.state.get("orders", {})),
+        )
 
         op_cfg = config.get("opinion", {})
         api_key = resolve_secret(op_cfg, "api_key", op_cfg.get("api_key_env", ""))
@@ -68,6 +118,7 @@ class MarketMaker:
                 min_interval,
                 timeout,
             )
+        self.logger.info("data source=%s", source)
 
         self.markets: List[Dict[str, Any]] = []
         self._load_or_select_markets()
@@ -78,6 +129,13 @@ class MarketMaker:
         self.switch_cancel_all = bool(switch_cfg.get("cancel_all_on_switch", True))
         self.switch_run_selector = bool(switch_cfg.get("run_selector_on_switch", True))
         self.next_switch_ts = time.time() + self.switch_interval if self.switch_enabled else 0
+        self.logger.info(
+            "market switch enabled=%s interval=%ss cancel_all=%s run_selector=%s",
+            self.switch_enabled,
+            self.switch_interval,
+            self.switch_cancel_all,
+            self.switch_run_selector,
+        )
 
     def _load_or_select_markets(self) -> None:
         selector_cfg = self.config.get("market_selector", {})
@@ -85,9 +143,11 @@ class MarketMaker:
         auto_run = bool(selector_cfg.get("auto_run_on_missing", False))
         try:
             self.markets = _load_json(output_file)
+            self.logger.info("markets loaded path=%s count=%d", output_file, len(self.markets))
         except FileNotFoundError:
             if auto_run:
                 self.markets = select_and_write(self.config)
+                self.logger.info("markets generated via selector count=%d", len(self.markets))
                 return
             raise RuntimeError(
                 f"Missing {output_file}. Run scripts/run_market_selector.py to generate it."
@@ -100,6 +160,7 @@ class MarketMaker:
         if now < self.next_switch_ts:
             return
 
+        self.logger.info("market switch triggered")
         if self.switch_run_selector:
             select_and_write(self.config)
 
@@ -109,15 +170,59 @@ class MarketMaker:
 
         old_ids = {str(m.get("topicId")) for m in self.markets}
         new_ids = {str(m.get("topicId")) for m in new_markets}
+        if old_ids != new_ids:
+            self.logger.info(
+                "market switch change old_count=%d new_count=%d",
+                len(old_ids),
+                len(new_ids),
+            )
         if old_ids != new_ids and self.switch_cancel_all:
             try:
                 self.executor.cancel_all_orders()
             except Exception as exc:
-                print(f"[WARN] cancel_all_orders failed: {exc}")
-            self.state["orders"] = {}
+                self.logger.warning("cancel_all_orders failed: %s", exc)
+            self._clear_state_orders("market_switch")
 
         self.markets = new_markets
         self.next_switch_ts = now + self.switch_interval
+
+    def _clear_state_orders(self, reason: str) -> None:
+        if not self.state.get("orders"):
+            return
+        if self.log_state_changes:
+            self.logger.info(
+                "state clear orders=%d reason=%s",
+                len(self.state.get("orders", {})),
+                reason,
+            )
+        self.state["orders"] = {}
+
+    def _log_state_add(self, key: str, order: Dict[str, Any]) -> None:
+        if not self.log_state_changes:
+            return
+        price_val = _fmt_float(_to_float(order.get("price")))
+        size_val = _fmt_float(_to_float(order.get("size")), 4)
+        self.logger.info(
+            "state add key=%s order_id=%s price=%s size=%s",
+            key,
+            order.get("order_id"),
+            price_val,
+            size_val,
+        )
+
+    def _log_state_remove(self, key: str, order: Dict[str, Any], reason: str) -> None:
+        if not self.log_state_changes:
+            return
+        price_val = _fmt_float(_to_float(order.get("price")))
+        size_val = _fmt_float(_to_float(order.get("size")), 4)
+        self.logger.info(
+            "state remove key=%s order_id=%s price=%s size=%s reason=%s",
+            key,
+            order.get("order_id"),
+            price_val,
+            size_val,
+            reason,
+        )
 
     def _update_order(
         self,
@@ -138,21 +243,66 @@ class MarketMaker:
         if existing:
             existing_price = float(existing.get("price", 0))
             if cancel_on_proximity and should_cancel_on_proximity(existing_price, reference_price, proximity_bps):
+                if self.log_decisions:
+                    self.logger.info(
+                        "cancel proximity market=%s token=%s side=%s order_id=%s existing_price=%s ref_price=%s proximity_bps=%s",
+                        market_id,
+                        token_id,
+                        side,
+                        existing.get("order_id"),
+                        _fmt_float(existing_price),
+                        _fmt_float(reference_price),
+                        proximity_bps,
+                    )
                 try:
                     self.executor.cancel_order(existing["order_id"])
                 except Exception as exc:
-                    print(f"[WARN] cancel failed {existing['order_id']}: {exc}")
+                    self.logger.warning("cancel failed %s: %s", existing["order_id"], exc)
                 self.state["orders"].pop(key, None)
+                self._log_state_remove(key, existing, "proximity")
                 return
-            if price_diff_bps(existing_price, desired_price) < replace_bps:
+            diff_bps = price_diff_bps(existing_price, desired_price)
+            if diff_bps < replace_bps:
+                if self.log_decisions:
+                    self.logger.info(
+                        "skip replace market=%s token=%s side=%s existing_price=%s desired_price=%s diff_bps=%s replace_bps=%s",
+                        market_id,
+                        token_id,
+                        side,
+                        _fmt_float(existing_price),
+                        _fmt_float(desired_price),
+                        _fmt_float(diff_bps, 2),
+                        _fmt_float(replace_bps, 2),
+                    )
                 return
+            if self.log_decisions:
+                self.logger.info(
+                    "replace order market=%s token=%s side=%s existing_price=%s desired_price=%s diff_bps=%s replace_bps=%s",
+                    market_id,
+                    token_id,
+                    side,
+                    _fmt_float(existing_price),
+                    _fmt_float(desired_price),
+                    _fmt_float(diff_bps, 2),
+                    _fmt_float(replace_bps, 2),
+                )
             try:
                 self.executor.cancel_order(existing["order_id"])
             except Exception as exc:
-                print(f"[WARN] cancel failed {existing['order_id']}: {exc}")
+                self.logger.warning("cancel failed %s: %s", existing["order_id"], exc)
             self.state["orders"].pop(key, None)
+            self._log_state_remove(key, existing, "replace")
 
         try:
+            if self.log_order_params:
+                self.logger.info(
+                    "place order market=%s token=%s side=%s price=%s size=%s",
+                    market_id,
+                    token_id,
+                    side,
+                    _fmt_float(desired_price),
+                    _fmt_float(size, 4),
+                )
             order_id = self.executor.place_limit_order(
                 market_id=market_id,
                 token_id=token_id,
@@ -161,7 +311,7 @@ class MarketMaker:
                 size=size,
             )
         except Exception as exc:
-            print(f"[WARN] place failed {market_id} {token_id} {side}: {exc}")
+            self.logger.warning("place failed market=%s token=%s side=%s err=%s", market_id, token_id, side, exc)
             order_id = None
         if order_id:
             self.state["orders"][key] = {
@@ -169,17 +319,42 @@ class MarketMaker:
                 "price": desired_price,
                 "size": size,
             }
+            self._log_state_add(key, self.state["orders"][key])
+            if self.log_order_params:
+                self.logger.info(
+                    "place ok market=%s token=%s side=%s order_id=%s",
+                    market_id,
+                    token_id,
+                    side,
+                    order_id,
+                )
 
-    def _cancel_order(self, *, market_id: int, token_id: str, side: str) -> None:
+    def _cancel_order(self, *, market_id: int, token_id: str, side: str, reason: str = "cancel") -> None:
         key = _order_key(market_id, token_id, side)
         existing = self.state["orders"].get(key)
         if not existing:
+            if self.log_decisions:
+                self.logger.info(
+                    "cancel skip market=%s token=%s side=%s reason=missing",
+                    market_id,
+                    token_id,
+                    side,
+                )
             return
+        if self.log_order_params:
+            self.logger.info(
+                "cancel order market=%s token=%s side=%s order_id=%s",
+                market_id,
+                token_id,
+                side,
+                existing.get("order_id"),
+            )
         try:
             self.executor.cancel_order(existing["order_id"])
         except Exception as exc:
-            print(f"[WARN] cancel failed {existing['order_id']}: {exc}")
+            self.logger.warning("cancel failed %s: %s", existing["order_id"], exc)
         self.state["orders"].pop(key, None)
+        self._log_state_remove(key, existing, reason)
 
     def _select_token(self, market: Dict[str, Any]) -> Tuple[str, str, int]:
         token_id = market.get("yes_token_id")
@@ -201,18 +376,38 @@ class MarketMaker:
         reference = str(risk_cfg.get("reference_price", "mid")).lower()
 
         if size < min_size:
+            if self.log_decisions:
+                self.logger.info(
+                    "skip run size too small size=%s min_size=%s",
+                    _fmt_float(size, 4),
+                    _fmt_float(min_size, 4),
+                )
             return
+        self.logger.info(
+            "loop start markets=%d level=%d size=%s min_size=%s replace_bps=%s proximity_bps=%s reference=%s",
+            len(self.markets),
+            level,
+            _fmt_float(size, 4),
+            _fmt_float(min_size, 4),
+            _fmt_float(replace_bps, 2),
+            _fmt_float(proximity_bps, 2),
+            reference,
+        )
 
         for idx, market in enumerate(self.markets):
             market_id = int(market.get("topicId"))
             token_id, _side_label, symbol_types = self._select_token(market)
             if not token_id:
+                if self.log_decisions:
+                    self.logger.info("skip market=%s reason=missing_token_id", market_id)
                 continue
 
             try:
                 if isinstance(self.data_client, OpinionFrontendClient):
                     question_id = market.get("questionId")
                     if not question_id:
+                        if self.log_decisions:
+                            self.logger.info("skip market=%s token=%s reason=missing_question_id", market_id, token_id)
                         continue
                     book = self.data_client.fetch_orderbook(
                         question_id=str(question_id),
@@ -223,7 +418,7 @@ class MarketMaker:
                 else:
                     book = self.data_client.fetch_orderbook(str(token_id))
             except Exception as exc:
-                print(f"[WARN] orderbook failed {market_id} {token_id}: {exc}")
+                self.logger.warning("orderbook failed market=%s token=%s err=%s", market_id, token_id, exc)
                 continue
 
             best_bid, best_ask = best_bid_ask(book)
@@ -231,19 +426,52 @@ class MarketMaker:
             desired_ask = price_at_level(book, "ask", level) or best_ask
 
             if desired_bid is None or desired_ask is None:
+                if self.log_decisions:
+                    self.logger.info(
+                        "skip market=%s token=%s reason=missing_desired_price best_bid=%s best_ask=%s",
+                        market_id,
+                        token_id,
+                        _fmt_float(best_bid),
+                        _fmt_float(best_ask),
+                    )
                 continue
             if desired_bid <= 0 or desired_ask <= 0 or desired_bid >= desired_ask:
+                if self.log_decisions:
+                    self.logger.info(
+                        "skip market=%s token=%s reason=invalid_spread desired_bid=%s desired_ask=%s",
+                        market_id,
+                        token_id,
+                        _fmt_float(desired_bid),
+                        _fmt_float(desired_ask),
+                    )
                 continue
 
             bid_depth = depth_at_levels(book, "bid", level)
             ask_depth = depth_at_levels(book, "ask", level)
             if bid_depth is None and ask_depth is None:
+                if self.log_decisions:
+                    self.logger.info("skip market=%s token=%s reason=missing_depth", market_id, token_id)
                 continue
 
             ref_price = _reference_price(reference, best_bid, best_ask)
+            if self.log_orderbook:
+                self.logger.info(
+                    "book market=%s token=%s best_bid=%s best_ask=%s desired_bid=%s desired_ask=%s bid_depth=%s ask_depth=%s ref_price=%s",
+                    market_id,
+                    token_id,
+                    _fmt_float(best_bid),
+                    _fmt_float(best_ask),
+                    _fmt_float(desired_bid),
+                    _fmt_float(desired_ask),
+                    _fmt_float(bid_depth, 4),
+                    _fmt_float(ask_depth, 4),
+                    _fmt_float(ref_price),
+                )
 
             if ask_depth is None or (bid_depth is not None and bid_depth >= ask_depth):
-                self._cancel_order(market_id=market_id, token_id=token_id, side="sell")
+                if self.log_decisions:
+                    self.logger.info("decision market=%s token=%s action=place_buy cancel_side=sell", market_id, token_id)
+                self._cancel_order(market_id=market_id, token_id=token_id, side="sell", reason="opposite_side")
                 self._update_order(
                     market_id=market_id,
                     token_id=token_id,
@@ -256,7 +484,9 @@ class MarketMaker:
                     cancel_on_proximity=cancel_on_proximity,
                 )
             else:
-                self._cancel_order(market_id=market_id, token_id=token_id, side="buy")
+                if self.log_decisions:
+                    self.logger.info("decision market=%s token=%s action=place_sell cancel_side=buy", market_id, token_id)
+                self._cancel_order(market_id=market_id, token_id=token_id, side="buy", reason="opposite_side")
                 self._update_order(
                     market_id=market_id,
                     token_id=token_id,
@@ -270,6 +500,12 @@ class MarketMaker:
                 )
 
         save_state(self.state_path, self.state)
+        if self.log_state_changes:
+            self.logger.info(
+                "state saved path=%s orders=%d",
+                self.state_path,
+                len(self.state.get("orders", {})),
+            )
 
     def run_forever(self) -> None:
         interval = int((self.config.get("runtime") or {}).get("loop_interval_seconds", 3))

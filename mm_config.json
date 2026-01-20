@@ -31,7 +31,7 @@
     "reference_price": "mid"
   },
   "opinion": {
-    "host": "https://openapi.opinion.trade/openapi",
+    "host": "https://proxy.opinion.trade:8443",
     "chain_id": 56,
     "api_key_env": "OPINION_API_KEY",
     "rpc_url_env": "OPINION_RPC_URL",
