@@ -64,13 +64,9 @@ def _extract_order_id(result: Any) -> Optional[str]:
     if result is None:
         return None
     order_id = None
-
-    if hasattr(result, "order_data"):
-        order_data = getattr(result, "order_data")
-        order_id = getattr(order_data, "order_id", None)
-    if order_id is None and hasattr(result, "orderData"):
-        order_data = getattr(result, "orderData")
-        order_id = getattr(order_data, "orderId", None)
+    order_id = _extract_order_id_from_obj(result)
+    if order_id is None and hasattr(result, "result"):
+        order_id = _extract_order_id_from_obj(getattr(result, "result"))
 
     if order_id is None and isinstance(result, dict):
         order_data = result.get("orderData") or result.get("order_data")
@@ -78,10 +74,35 @@ def _extract_order_id(result: Any) -> Optional[str]:
             order_id = order_data.get("orderId") or order_data.get("order_id")
         if order_id is None:
             order_id = result.get("orderId") or result.get("order_id")
+        if order_id is None and isinstance(result.get("result"), dict):
+            inner = result.get("result") or {}
+            order_data = inner.get("orderData") or inner.get("order_data")
+            if isinstance(order_data, dict):
+                order_id = order_data.get("orderId") or order_data.get("order_id")
+            if order_id is None:
+                order_id = inner.get("orderId") or inner.get("order_id")
 
     if order_id is None:
         return None
     return str(order_id)
+
+
+def _extract_order_id_from_obj(obj: Any) -> Optional[str]:
+    if obj is None:
+        return None
+    if hasattr(obj, "order_data"):
+        order_data = getattr(obj, "order_data")
+        if hasattr(order_data, "order_id"):
+            return getattr(order_data, "order_id")
+    if hasattr(obj, "orderData"):
+        order_data = getattr(obj, "orderData")
+        if hasattr(order_data, "orderId"):
+            return getattr(order_data, "orderId")
+    if hasattr(obj, "order_id"):
+        return getattr(obj, "order_id")
+    if hasattr(obj, "orderId"):
+        return getattr(obj, "orderId")
+    return None
 
 
 def _summarize_result(result: Any, limit: int = 800) -> str:
