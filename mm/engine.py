@@ -6,7 +6,7 @@ from .config import resolve_secret
 from .market_data import OpinionFrontendClient, OpinionOpenApiClient
 from .market_selector import select_and_write
 from .orders import OpinionOrderExecutor
-from .quote import best_bid_ask, format_price, price_at_level, price_diff_bps
+from .quote import best_bid_ask, depth_at_levels, format_price, price_at_level, price_diff_bps
 from .risk import should_cancel_on_proximity
 from .state import load_state, save_state
 
@@ -170,12 +170,22 @@ class MarketMaker:
                 "size": size,
             }
 
+    def _cancel_order(self, *, market_id: int, token_id: str, side: str) -> None:
+        key = _order_key(market_id, token_id, side)
+        existing = self.state["orders"].get(key)
+        if not existing:
+            return
+        try:
+            self.executor.cancel_order(existing["order_id"])
+        except Exception as exc:
+            print(f"[WARN] cancel failed {existing['order_id']}: {exc}")
+        self.state["orders"].pop(key, None)
+
     def _select_token(self, market: Dict[str, Any]) -> Tuple[str, str, int]:
-        quote_cfg = self.config.get("quote", {})
-        token_side = (quote_cfg.get("token_side") or "yes").lower()
-        if token_side == "no":
-            return str(market.get("no_token_id")), "no", 1
-        return str(market.get("yes_token_id")), "yes", 0
+        token_id = market.get("yes_token_id")
+        if token_id is None:
+            return "", "yes", 0
+        return str(token_id), "yes", 0
 
     def run_once(self) -> None:
         self._maybe_switch_markets()
@@ -225,30 +235,39 @@ class MarketMaker:
             if desired_bid <= 0 or desired_ask <= 0 or desired_bid >= desired_ask:
                 continue
 
+            bid_depth = depth_at_levels(book, "bid", level)
+            ask_depth = depth_at_levels(book, "ask", level)
+            if bid_depth is None and ask_depth is None:
+                continue
+
             ref_price = _reference_price(reference, best_bid, best_ask)
 
-            self._update_order(
-                market_id=market_id,
-                token_id=token_id,
-                side="buy",
-                desired_price=desired_bid,
-                size=size,
-                reference_price=ref_price,
-                replace_bps=replace_bps,
-                proximity_bps=proximity_bps,
-                cancel_on_proximity=cancel_on_proximity,
-            )
-            self._update_order(
-                market_id=market_id,
-                token_id=token_id,
-                side="sell",
-                desired_price=desired_ask,
-                size=size,
-                reference_price=ref_price,
-                replace_bps=replace_bps,
-                proximity_bps=proximity_bps,
-                cancel_on_proximity=cancel_on_proximity,
-            )
+            if ask_depth is None or (bid_depth is not None and bid_depth >= ask_depth):
+                self._cancel_order(market_id=market_id, token_id=token_id, side="sell")
+                self._update_order(
+                    market_id=market_id,
+                    token_id=token_id,
+                    side="buy",
+                    desired_price=desired_bid,
+                    size=size,
+                    reference_price=ref_price,
+                    replace_bps=replace_bps,
+                    proximity_bps=proximity_bps,
+                    cancel_on_proximity=cancel_on_proximity,
+                )
+            else:
+                self._cancel_order(market_id=market_id, token_id=token_id, side="buy")
+                self._update_order(
+                    market_id=market_id,
+                    token_id=token_id,
+                    side="sell",
+                    desired_price=desired_ask,
+                    size=size,
+                    reference_price=ref_price,
+                    replace_bps=replace_bps,
+                    proximity_bps=proximity_bps,
+                    cancel_on_proximity=cancel_on_proximity,
+                )
 
         save_state(self.state_path, self.state)
 

@@ -49,6 +49,26 @@ def price_at_level(book: Dict[str, Any], side: str, level: int) -> Optional[floa
     return price
 
 
+def depth_at_levels(book: Dict[str, Any], side: str, level: int) -> Optional[float]:
+    if level <= 0:
+        return None
+    levels = book.get("bids") if side == "bid" else book.get("asks")
+    if not levels:
+        return None
+    total = 0.0
+    saw_size = False
+    for idx in range(min(level, len(levels))):
+        _, size = _extract_level(levels[idx])
+        qty = _to_float(size)
+        if qty is None:
+            continue
+        saw_size = True
+        total += qty
+    if not saw_size:
+        return None
+    return total
+
+
 def format_price(price: float) -> str:
     text = f"{price:.6f}".rstrip("0").rstrip(".")
     return text or "0"
