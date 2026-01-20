@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -92,6 +93,27 @@ class MarketMaker:
             len(self.state.get("orders", {})),
         )
         self._frontend_auth_refresher: Optional[FrontendAuthRefresher] = None
+        self._order_sync_cfg = config.get("order_sync", {})
+        self._order_sync_enabled = bool(self._order_sync_cfg.get("enabled", False))
+        try:
+            max_interval = int(self._order_sync_cfg.get("interval_loops", 1))
+        except (TypeError, ValueError):
+            max_interval = 1
+        try:
+            min_interval = int(self._order_sync_cfg.get("min_interval_loops", 1))
+        except (TypeError, ValueError):
+            min_interval = 1
+        try:
+            backoff_factor = float(self._order_sync_cfg.get("backoff_factor", 2.0))
+        except (TypeError, ValueError):
+            backoff_factor = 2.0
+        self._order_sync_max_interval = max(1, max_interval)
+        self._order_sync_min_interval = max(1, min_interval)
+        if self._order_sync_min_interval > self._order_sync_max_interval:
+            self._order_sync_min_interval = self._order_sync_max_interval
+        self._order_sync_backoff_factor = max(1.0, backoff_factor)
+        self._order_sync_interval = self._order_sync_max_interval
+        self._order_sync_next_loop = 0
 
         op_cfg = config.get("opinion", {})
         api_key = resolve_secret(op_cfg, "api_key", op_cfg.get("api_key_env", ""))
@@ -176,6 +198,13 @@ class MarketMaker:
             self.switch_cancel_all,
             self.switch_run_selector,
         )
+        if self._order_sync_enabled:
+            self.logger.info(
+                "order sync enabled min_loops=%d max_loops=%d backoff_factor=%s",
+                self._order_sync_min_interval,
+                self._order_sync_max_interval,
+                self._order_sync_backoff_factor,
+            )
 
     def _load_or_select_markets(self) -> None:
         selector_cfg = self.config.get("market_selector", {})
@@ -270,15 +299,30 @@ class MarketMaker:
             reason,
         )
 
+    def _snapshot_orders(self, market_id: int, token_id: str) -> Dict[str, Tuple[str, Optional[float], Optional[float]]]:
+        snapshot: Dict[str, Tuple[str, Optional[float], Optional[float]]] = {}
+        for side in ("buy", "sell"):
+            key = _order_key(market_id, token_id, side)
+            existing = self.state.get("orders", {}).get(key)
+            if not existing:
+                continue
+            snapshot[key] = (
+                str(existing.get("order_id")),
+                _to_float(existing.get("price")),
+                _to_float(existing.get("size")),
+            )
+        return snapshot
+
     def _sync_open_orders(
         self,
         *,
         market_id: int,
         token_id: str,
         sync_cfg: Dict[str, Any],
-    ) -> None:
+    ) -> Optional[bool]:
         if not sync_cfg.get("enabled", False):
-            return
+            return None
+        prev_snapshot = self._snapshot_orders(market_id, token_id)
         status = str(sync_cfg.get("status", "1"))
         limit = int(sync_cfg.get("limit", 20))
         max_pages = int(sync_cfg.get("max_pages", 3))
@@ -298,7 +342,7 @@ class MarketMaker:
                 exc,
                 _elapsed_ms(t0),
             )
-            return
+            return None
         self.logger.info(
             "net fetch_open_orders market=%s token=%s count=%d elapsed_ms=%.1f",
             market_id,
@@ -381,6 +425,34 @@ class MarketMaker:
                 "size": info.get("size"),
             }
             self._log_state_add(key, self.state["orders"][key])
+        curr_snapshot = self._snapshot_orders(market_id, token_id)
+        return prev_snapshot != curr_snapshot
+
+    def _order_sync_due(self) -> bool:
+        if not self._order_sync_enabled:
+            return False
+        return self.loop_count >= self._order_sync_next_loop
+
+    def _schedule_order_sync_next_loop(self) -> None:
+        if not self._order_sync_enabled:
+            return
+        self._order_sync_interval = self._order_sync_min_interval
+        next_loop = self.loop_count + 1
+        if self._order_sync_next_loop <= self.loop_count:
+            self._order_sync_next_loop = next_loop
+        else:
+            self._order_sync_next_loop = min(self._order_sync_next_loop, next_loop)
+
+    def _apply_order_sync_backoff(self, changed: bool) -> None:
+        if not self._order_sync_enabled:
+            return
+        if changed:
+            self._order_sync_interval = self._order_sync_min_interval
+        else:
+            current = max(self._order_sync_min_interval, self._order_sync_interval)
+            next_interval = int(math.ceil(current * self._order_sync_backoff_factor))
+            self._order_sync_interval = min(self._order_sync_max_interval, max(self._order_sync_min_interval, next_interval))
+        self._order_sync_next_loop = self.loop_count + self._order_sync_interval
 
     def _update_order(
         self,
@@ -517,6 +589,7 @@ class MarketMaker:
                 _elapsed_ms(t0),
             )
             order_id = None
+        self._schedule_order_sync_next_loop()
         if order_id:
             self.state["orders"][key] = {
                 "order_id": order_id,
@@ -586,14 +659,8 @@ class MarketMaker:
         self._maybe_switch_markets()
         quote_cfg = self.config.get("quote", {})
         risk_cfg = self.config.get("risk", {})
-        sync_cfg = self.config.get("order_sync", {})
-        try:
-            sync_every = int(sync_cfg.get("interval_loops", 1))
-        except (TypeError, ValueError):
-            sync_every = 1
-        if sync_every < 1:
-            sync_every = 1
-        do_sync = bool(sync_cfg.get("enabled", False)) and (self.loop_count % sync_every == 0)
+        sync_cfg = self._order_sync_cfg
+        do_sync = self._order_sync_due()
 
         level = int(quote_cfg.get("orderbook_level", 5))
         size = float(quote_cfg.get("size_per_side", 10.0))
@@ -622,6 +689,8 @@ class MarketMaker:
             reference,
         )
 
+        sync_changed = False
+        sync_success = False
         for idx, market in enumerate(self.markets):
             market_id = int(market.get("topicId"))
             token_id, _side_label, symbol_types = self._select_token(market)
@@ -631,7 +700,11 @@ class MarketMaker:
                 continue
 
             if do_sync:
-                self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
+                result = self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
+                if result is not None:
+                    sync_success = True
+                    if result:
+                        sync_changed = True
 
             t0 = time.perf_counter()
             try:
@@ -807,6 +880,9 @@ class MarketMaker:
             else:
                 if self.log_decisions:
                     self.logger.info("skip market=%s token=%s reason=missing_target_side", market_id, token_id)
+
+        if do_sync and sync_success:
+            self._apply_order_sync_backoff(sync_changed)
 
         save_state(self.state_path, self.state)
         if self.log_state_changes:
