@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .config import resolve_secret
+from .frontend_auth import FrontendAuthRefresher
 from .market_data import OpinionFrontendClient, OpinionOpenApiClient
 from .market_selector import select_and_write
 from .orders import OpinionOrderExecutor, normalize_order
@@ -90,6 +91,7 @@ class MarketMaker:
             self.state_path,
             len(self.state.get("orders", {})),
         )
+        self._frontend_auth_refresher: Optional[FrontendAuthRefresher] = None
 
         op_cfg = config.get("opinion", {})
         api_key = resolve_secret(op_cfg, "api_key", op_cfg.get("api_key_env", ""))
@@ -114,6 +116,39 @@ class MarketMaker:
             waf = resolve_secret(data_cfg, "frontend_waf", data_cfg.get("frontend_waf_env", ""))
             auth_mode = str(data_cfg.get("frontend_auth_mode", "random"))
             self.data_client = OpinionFrontendClient(auth, device_fp, waf, auth_mode=auth_mode)
+            refresh_cfg = data_cfg.get("frontend_auth_refresh", {})
+            if bool(refresh_cfg.get("enabled", False)):
+                try:
+                    refresh_interval = refresh_cfg.get("interval_seconds")
+                    refresh_interval_s = int(refresh_interval) if refresh_interval else None
+                    env_path = refresh_cfg.get("env_file", ".env")
+                    persist_env = bool(refresh_cfg.get("persist_env", True))
+                    refresh_on_start = bool(refresh_cfg.get("refresh_on_start", True))
+                    refresh_before = int(refresh_cfg.get("refresh_before_seconds", 300))
+                    min_sleep = int(refresh_cfg.get("min_sleep_seconds", 30))
+                    timeout_s = int(refresh_cfg.get("timeout_seconds", 20))
+                    chain_id = int(op_cfg.get("chain_id", 56))
+                    self._frontend_auth_refresher = FrontendAuthRefresher(
+                        update_callback=self.data_client.update_auth,
+                        chain_id=chain_id,
+                        refresh_before=refresh_before,
+                        min_sleep=min_sleep,
+                        timeout_s=timeout_s,
+                        refresh_interval_s=refresh_interval_s,
+                        env_path=env_path,
+                        persist_env=persist_env,
+                        refresh_on_start=refresh_on_start,
+                        logger=self.logger,
+                    )
+                    self._frontend_auth_refresher.start()
+                    self.logger.info(
+                        "frontend auth refresh enabled interval=%s persist_env=%s env=%s",
+                        refresh_interval_s,
+                        persist_env,
+                        env_path,
+                    )
+                except Exception as exc:
+                    self.logger.warning("frontend auth refresh disabled err=%s", exc)
         else:
             min_interval = float(op_cfg.get("http_min_interval", 0.2))
             timeout = float(op_cfg.get("http_timeout_seconds", 15))

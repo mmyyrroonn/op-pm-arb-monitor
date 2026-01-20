@@ -1,4 +1,5 @@
 import random
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -45,6 +46,17 @@ def _split_csv(raw: str) -> List[str]:
     return [item for item in cleaned.split() if item]
 
 
+def _normalize_auth_tokens(raw: str) -> List[str]:
+    tokens = _split_csv(raw)
+    normalized: List[str] = []
+    for token in tokens:
+        if token.startswith("Bearer "):
+            normalized.append(token)
+        else:
+            normalized.append(f"Bearer {token}")
+    return normalized
+
+
 class OpinionOpenApiClient:
     def __init__(self, host: str, api_key: str, min_interval: float, timeout: float) -> None:
         self.host = host.rstrip("/")
@@ -76,12 +88,13 @@ class OpinionFrontendClient:
         waf_token: str = "",
         auth_mode: str = "random",
     ) -> None:
-        self.auth_tokens = _split_csv(auth_token)
+        self.auth_tokens = _normalize_auth_tokens(auth_token)
         self.device_fingerprints = _split_csv(device_fingerprint)
         self.waf_token = waf_token
         self.auth_mode = (auth_mode or "random").lower()
         self._rr_index = 0
         self._warned_fp_mismatch = False
+        self._lock = threading.Lock()
 
     def fetch_orderbook(
         self,
@@ -101,35 +114,43 @@ class OpinionFrontendClient:
         )
         return _normalize_book(data)
 
-    def _pick_auth(self, worker_idx: Optional[int]) -> Tuple[str, str]:
-        if not self.auth_tokens:
-            return "", self.device_fingerprints[0] if self.device_fingerprints else ""
+    def update_auth(self, auth_token: str, device_fingerprint: str) -> None:
+        with self._lock:
+            self.auth_tokens = _normalize_auth_tokens(auth_token)
+            self.device_fingerprints = _split_csv(device_fingerprint)
+            self._rr_index = 0
+            self._warned_fp_mismatch = False
 
-        idx = 0
-        if len(self.auth_tokens) > 1:
-            mode = self.auth_mode
-            if mode in ("worker", "worker_round_robin", "worker_rr"):
-                if worker_idx is not None:
-                    idx = worker_idx % len(self.auth_tokens)
-                else:
+    def _pick_auth(self, worker_idx: Optional[int]) -> Tuple[str, str]:
+        with self._lock:
+            if not self.auth_tokens:
+                return "", self.device_fingerprints[0] if self.device_fingerprints else ""
+
+            idx = 0
+            if len(self.auth_tokens) > 1:
+                mode = self.auth_mode
+                if mode in ("worker", "worker_round_robin", "worker_rr"):
+                    if worker_idx is not None:
+                        idx = worker_idx % len(self.auth_tokens)
+                    else:
+                        idx = self._rr_index % len(self.auth_tokens)
+                        self._rr_index += 1
+                elif mode in ("round_robin", "rr"):
                     idx = self._rr_index % len(self.auth_tokens)
                     self._rr_index += 1
-            elif mode in ("round_robin", "rr"):
-                idx = self._rr_index % len(self.auth_tokens)
-                self._rr_index += 1
-            else:
-                idx = random.randrange(len(self.auth_tokens))
+                else:
+                    idx = random.randrange(len(self.auth_tokens))
 
-        token = self.auth_tokens[idx]
-        fp = ""
-        if self.device_fingerprints:
-            if len(self.device_fingerprints) == 1:
-                fp = self.device_fingerprints[0]
-            elif len(self.device_fingerprints) == len(self.auth_tokens):
-                fp = self.device_fingerprints[idx]
-            else:
-                fp = self.device_fingerprints[0]
-                if not self._warned_fp_mismatch:
-                    print("[WARN] frontend device fingerprints count mismatch; using first fingerprint")
-                    self._warned_fp_mismatch = True
-        return token, fp
+            token = self.auth_tokens[idx]
+            fp = ""
+            if self.device_fingerprints:
+                if len(self.device_fingerprints) == 1:
+                    fp = self.device_fingerprints[0]
+                elif len(self.device_fingerprints) == len(self.auth_tokens):
+                    fp = self.device_fingerprints[idx]
+                else:
+                    fp = self.device_fingerprints[0]
+                    if not self._warned_fp_mismatch:
+                        print("[WARN] frontend device fingerprints count mismatch; using first fingerprint")
+                        self._warned_fp_mismatch = True
+            return token, fp

@@ -51,7 +51,17 @@
     "source": "frontend",
     "frontend_auth_env": "OPINION_FRONTEND_AUTH",
     "frontend_device_fp_env": "OPINION_DEVICE_FINGERPRINT",
-    "frontend_waf_env": "OPINION_WAF_TOKEN"
+    "frontend_waf_env": "OPINION_WAF_TOKEN",
+    "frontend_auth_refresh": {
+      "enabled": true,
+      "interval_seconds": 21600,
+      "refresh_before_seconds": 300,
+      "min_sleep_seconds": 30,
+      "timeout_seconds": 20,
+      "refresh_on_start": true,
+      "persist_env": true,
+      "env_file": ".env"
+    }
   },
   "state": {
     "file": "mm_state.json"
