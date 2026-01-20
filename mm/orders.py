@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, Optional, Union
 
 from opinion_clob_sdk import Client, CHAIN_ID_BNB_MAINNET
@@ -47,7 +48,10 @@ class OpinionOrderExecutor:
             orderType=LIMIT_ORDER,
         )
         result = self.client.place_order(payload, check_approval=False)
-        return _extract_order_id(result)
+        order_id = _extract_order_id(result)
+        if order_id is None:
+            raise RuntimeError(f"place_order missing order_id result={_summarize_result(result)}")
+        return order_id
 
     def cancel_order(self, order_id: str) -> Any:
         return self.client.cancel_order(order_id)
@@ -78,6 +82,19 @@ def _extract_order_id(result: Any) -> Optional[str]:
     if order_id is None:
         return None
     return str(order_id)
+
+
+def _summarize_result(result: Any, limit: int = 800) -> str:
+    try:
+        if isinstance(result, dict):
+            text = json.dumps(result, ensure_ascii=True, default=str)
+        else:
+            text = repr(result)
+    except Exception:
+        text = repr(result)
+    if len(text) > limit:
+        return text[:limit] + "...(truncated)"
+    return text
 
 
 def side_from_string(val: str) -> OrderSide:
