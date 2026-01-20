@@ -21,13 +21,13 @@
     "price_source": "orderbook_level",
     "orderbook_level": 5,
     "token_side": "yes",
-    "size_per_side": 10.0,
-    "min_size": 1.0,
+    "size_per_side": 0.2,
+    "min_size": 0.2,
     "replace_bps": 5.0
   },
   "risk": {
     "cancel_on_price_proximity": true,
-    "proximity_bps": 5.0,
+    "proximity_bps": 2,
     "reference_price": "mid"
   },
   "opinion": {
@@ -41,7 +41,7 @@
     "http_timeout_seconds": 15
   },
   "opinion_data": {
-    "source": "openapi",
+    "source": "frontend",
     "frontend_auth_env": "OPINION_FRONTEND_AUTH",
     "frontend_device_fp_env": "OPINION_DEVICE_FINGERPRINT",
     "frontend_waf_env": "OPINION_WAF_TOKEN"
