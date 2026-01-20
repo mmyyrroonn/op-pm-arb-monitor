@@ -44,6 +44,10 @@ def _fmt_float(value: Optional[float], decimals: int = 6) -> str:
     return f"{value:.{decimals}f}"
 
 
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
+
+
 def _logging_config(config: Dict[str, Any]) -> Dict[str, Any]:
     raw = config.get("logging", {})
     return raw if isinstance(raw, dict) else {}
@@ -177,10 +181,16 @@ class MarketMaker:
                 len(new_ids),
             )
         if old_ids != new_ids and self.switch_cancel_all:
+            t0 = time.perf_counter()
             try:
                 self.executor.cancel_all_orders()
+                self.logger.info("net cancel_all_orders elapsed_ms=%.1f", _elapsed_ms(t0))
             except Exception as exc:
-                self.logger.warning("cancel_all_orders failed: %s", exc)
+                self.logger.warning(
+                    "net cancel_all_orders failed err=%s elapsed_ms=%.1f",
+                    exc,
+                    _elapsed_ms(t0),
+                )
             self._clear_state_orders("market_switch")
 
         self.markets = new_markets
@@ -236,6 +246,7 @@ class MarketMaker:
         status = str(sync_cfg.get("status", "1"))
         limit = int(sync_cfg.get("limit", 20))
         max_pages = int(sync_cfg.get("max_pages", 3))
+        t0 = time.perf_counter()
         try:
             orders = self.executor.fetch_open_orders(
                 market_id=market_id,
@@ -245,12 +256,20 @@ class MarketMaker:
             )
         except Exception as exc:
             self.logger.warning(
-                "open orders sync failed market=%s token=%s err=%s",
+                "net fetch_open_orders failed market=%s token=%s err=%s elapsed_ms=%.1f",
                 market_id,
                 token_id,
                 exc,
+                _elapsed_ms(t0),
             )
             return
+        self.logger.info(
+            "net fetch_open_orders market=%s token=%s count=%d elapsed_ms=%.1f",
+            market_id,
+            token_id,
+            len(orders),
+            _elapsed_ms(t0),
+        )
 
         normalized = []
         for order in orders:
@@ -358,9 +377,24 @@ class MarketMaker:
                         proximity_bps,
                     )
                 try:
+                    t0 = time.perf_counter()
                     self.executor.cancel_order(existing["order_id"])
+                    self.logger.info(
+                        "net cancel_order market=%s token=%s order_id=%s elapsed_ms=%.1f",
+                        market_id,
+                        token_id,
+                        existing.get("order_id"),
+                        _elapsed_ms(t0),
+                    )
                 except Exception as exc:
-                    self.logger.warning("cancel failed %s: %s", existing["order_id"], exc)
+                    self.logger.warning(
+                        "net cancel_order failed market=%s token=%s order_id=%s err=%s elapsed_ms=%.1f",
+                        market_id,
+                        token_id,
+                        existing.get("order_id"),
+                        exc,
+                        _elapsed_ms(t0),
+                    )
                 self.state["orders"].pop(key, None)
                 self._log_state_remove(key, existing, "proximity")
                 return
@@ -390,9 +424,24 @@ class MarketMaker:
                     _fmt_float(replace_bps, 2),
                 )
             try:
+                t0 = time.perf_counter()
                 self.executor.cancel_order(existing["order_id"])
+                self.logger.info(
+                    "net cancel_order market=%s token=%s order_id=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    existing.get("order_id"),
+                    _elapsed_ms(t0),
+                )
             except Exception as exc:
-                self.logger.warning("cancel failed %s: %s", existing["order_id"], exc)
+                self.logger.warning(
+                    "net cancel_order failed market=%s token=%s order_id=%s err=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    existing.get("order_id"),
+                    exc,
+                    _elapsed_ms(t0),
+                )
             self.state["orders"].pop(key, None)
             self._log_state_remove(key, existing, "replace")
 
@@ -406,6 +455,7 @@ class MarketMaker:
                     _fmt_float(desired_price),
                     _fmt_float(size, 4),
                 )
+            t0 = time.perf_counter()
             order_id = self.executor.place_limit_order(
                 market_id=market_id,
                 token_id=token_id,
@@ -413,8 +463,23 @@ class MarketMaker:
                 price=format_price(desired_price),
                 size=size,
             )
+            self.logger.info(
+                "net place_order market=%s token=%s side=%s order_id=%s elapsed_ms=%.1f",
+                market_id,
+                token_id,
+                side,
+                order_id,
+                _elapsed_ms(t0),
+            )
         except Exception as exc:
-            self.logger.warning("place failed market=%s token=%s side=%s err=%s", market_id, token_id, side, exc)
+            self.logger.warning(
+                "place failed market=%s token=%s side=%s err=%s elapsed_ms=%.1f",
+                market_id,
+                token_id,
+                side,
+                exc,
+                _elapsed_ms(t0),
+            )
             order_id = None
         if order_id:
             self.state["orders"][key] = {
@@ -452,10 +517,26 @@ class MarketMaker:
                 side,
                 existing.get("order_id"),
             )
+        t0 = time.perf_counter()
         try:
             self.executor.cancel_order(existing["order_id"])
         except Exception as exc:
-            self.logger.warning("cancel failed %s: %s", existing["order_id"], exc)
+            self.logger.warning(
+                "net cancel_order failed market=%s token=%s order_id=%s err=%s elapsed_ms=%.1f",
+                market_id,
+                token_id,
+                existing.get("order_id"),
+                exc,
+                _elapsed_ms(t0),
+            )
+        else:
+            self.logger.info(
+                "net cancel_order market=%s token=%s order_id=%s elapsed_ms=%.1f",
+                market_id,
+                token_id,
+                existing.get("order_id"),
+                _elapsed_ms(t0),
+            )
         self.state["orders"].pop(key, None)
         self._log_state_remove(key, existing, reason)
 
@@ -508,6 +589,7 @@ class MarketMaker:
 
             self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
 
+            t0 = time.perf_counter()
             try:
                 if isinstance(self.data_client, OpinionFrontendClient):
                     question_id = market.get("questionId")
@@ -524,8 +606,22 @@ class MarketMaker:
                 else:
                     book = self.data_client.fetch_orderbook(str(token_id))
             except Exception as exc:
-                self.logger.warning("orderbook failed market=%s token=%s err=%s", market_id, token_id, exc)
+                self.logger.warning(
+                    "orderbook failed market=%s token=%s err=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    exc,
+                    _elapsed_ms(t0),
+                )
                 continue
+            source = "frontend" if isinstance(self.data_client, OpinionFrontendClient) else "openapi"
+            self.logger.info(
+                "net fetch_orderbook market=%s token=%s source=%s elapsed_ms=%.1f",
+                market_id,
+                token_id,
+                source,
+                _elapsed_ms(t0),
+            )
 
             best_bid, best_ask = best_bid_ask(book)
             desired_bid = price_at_level(book, "bid", level) or best_bid
