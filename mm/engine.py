@@ -331,38 +331,12 @@ class MarketMaker:
         market_id: int,
         token_id: str,
         no_token_id: Optional[str] = None,
+        orders: List[Any],
         sync_cfg: Dict[str, Any],
     ) -> Optional[bool]:
         if not sync_cfg.get("enabled", False):
             return None
         prev_snapshot = self._snapshot_orders(market_id, token_id)
-        status = str(sync_cfg.get("status", "1"))
-        limit = int(sync_cfg.get("limit", 20))
-        max_pages = int(sync_cfg.get("max_pages", 3))
-        t0 = time.perf_counter()
-        try:
-            orders = self.executor.fetch_open_orders(
-                market_id=market_id,
-                status=status,
-                limit=limit,
-                max_pages=max_pages,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "net fetch_open_orders failed market=%s token=%s err=%s elapsed_ms=%.1f",
-                market_id,
-                token_id,
-                exc,
-                _elapsed_ms(t0),
-            )
-            return None
-        self.logger.info(
-            "net fetch_open_orders market=%s token=%s count=%d elapsed_ms=%.1f",
-            market_id,
-            token_id,
-            len(orders),
-            _elapsed_ms(t0),
-        )
 
         normalized = []
         no_token_id_val = str(no_token_id) if no_token_id else ""
@@ -470,6 +444,34 @@ class MarketMaker:
             self._log_state_add(key, self.state["orders"][key])
         curr_snapshot = self._snapshot_orders(market_id, token_id)
         return prev_snapshot != curr_snapshot
+
+    def _fetch_open_orders(self, sync_cfg: Dict[str, Any]) -> Optional[List[Any]]:
+        if not sync_cfg.get("enabled", False):
+            return None
+        status = str(sync_cfg.get("status", "1"))
+        limit = int(sync_cfg.get("limit", 20))
+        max_pages = int(sync_cfg.get("max_pages", 3))
+        t0 = time.perf_counter()
+        try:
+            orders = self.executor.fetch_open_orders(
+                market_id=0,
+                status=status,
+                limit=limit,
+                max_pages=max_pages,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "net fetch_open_orders failed market=all token=all err=%s elapsed_ms=%.1f",
+                exc,
+                _elapsed_ms(t0),
+            )
+            return None
+        self.logger.info(
+            "net fetch_open_orders market=all token=all count=%d elapsed_ms=%.1f",
+            len(orders),
+            _elapsed_ms(t0),
+        )
+        return orders
 
     def _order_sync_due(self) -> bool:
         if not self._order_sync_enabled:
@@ -774,6 +776,11 @@ class MarketMaker:
 
         sync_changed = False
         sync_success = False
+        sync_orders: Optional[List[Any]] = None
+        if do_sync:
+            sync_orders = self._fetch_open_orders(sync_cfg)
+            if sync_orders is None:
+                do_sync = False
         for idx, market in enumerate(self.markets):
             market_id = int(market.get("topicId"))
             token_id, _side_label, symbol_types = self._select_token(market)
@@ -782,11 +789,12 @@ class MarketMaker:
                     self.logger.info("skip market=%s reason=missing_token_id", market_id)
                 continue
 
-            if do_sync:
+            if do_sync and sync_orders is not None:
                 result = self._sync_open_orders(
                     market_id=market_id,
                     token_id=token_id,
                     no_token_id=market.get("no_token_id"),
+                    orders=sync_orders,
                     sync_cfg=sync_cfg,
                 )
                 if result is not None:
