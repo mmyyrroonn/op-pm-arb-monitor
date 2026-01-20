@@ -1,0 +1,54 @@
+{
+  "market_selector": {
+    "source_file": "opinion_topics_merged.json",
+    "output_file": "selected_markets.json",
+    "market_pairs_file": "market_token_pairs.json",
+    "require_market_pairs": false,
+    "price_target": 0.5,
+    "price_tolerance": 0.05,
+    "volume_percentile_min": 0.1,
+    "volume_percentile_max": 0.3,
+    "max_markets": 12
+  },
+  "market_switch": {
+    "enabled": true,
+    "interval_seconds": 3600,
+    "cancel_all_on_switch": true,
+    "run_selector_on_switch": true
+  },
+  "quote": {
+    "price_source": "orderbook_level",
+    "orderbook_level": 5,
+    "token_side": "yes",
+    "size_per_side": 10.0,
+    "min_size": 1.0,
+    "replace_bps": 5.0
+  },
+  "risk": {
+    "cancel_on_price_proximity": true,
+    "proximity_bps": 5.0,
+    "reference_price": "mid"
+  },
+  "opinion": {
+    "host": "https://openapi.opinion.trade/openapi",
+    "chain_id": 56,
+    "api_key_env": "OPINION_API_KEY",
+    "rpc_url_env": "OPINION_RPC_URL",
+    "private_key_env": "OPINION_PRIVATE_KEY",
+    "multi_sig_addr_env": "OPINION_MULTI_SIG",
+    "http_min_interval": 0.2,
+    "http_timeout_seconds": 15
+  },
+  "opinion_data": {
+    "source": "openapi",
+    "frontend_auth_env": "OPINION_FRONTEND_AUTH",
+    "frontend_device_fp_env": "OPINION_DEVICE_FINGERPRINT",
+    "frontend_waf_env": "OPINION_WAF_TOKEN"
+  },
+  "state": {
+    "file": "mm_state.json"
+  },
+  "runtime": {
+    "loop_interval_seconds": 3
+  }
+}
