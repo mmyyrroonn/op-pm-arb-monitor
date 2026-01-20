@@ -206,12 +206,14 @@ def normalize_order(order: Any) -> Dict[str, Any]:
             ],
         )
     )
+    token_id = _extract_field(order, ["tokenId", "token_id", "tokenID"])
     outcome = _extract_field(order, ["outcome", "outcomeSide", "outcome_side"])
     return {
         "order_id": _extract_order_id(order),
         "side": side,
         "price": price,
         "size": size,
+        "token_id": token_id,
         "outcome": outcome,
     }
 

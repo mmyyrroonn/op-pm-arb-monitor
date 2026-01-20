@@ -33,6 +33,18 @@ def _reference_price(reference: str, best_bid: Optional[float], best_ask: Option
     return best_bid or best_ask
 
 
+def _complement_price(price: Optional[float]) -> Optional[float]:
+    if price is None:
+        return None
+    return 1.0 - price
+
+
+def _mapped_reference_price(side: str, reference_price: Optional[float]) -> Optional[float]:
+    if side == "sell":
+        return _complement_price(reference_price)
+    return reference_price
+
+
 def _to_float(value: Any) -> Optional[float]:
     try:
         return float(value)
@@ -318,6 +330,7 @@ class MarketMaker:
         *,
         market_id: int,
         token_id: str,
+        no_token_id: Optional[str] = None,
         sync_cfg: Dict[str, Any],
     ) -> Optional[bool]:
         if not sync_cfg.get("enabled", False):
@@ -352,6 +365,7 @@ class MarketMaker:
         )
 
         normalized = []
+        no_token_id_val = str(no_token_id) if no_token_id else ""
         for order in orders:
             info = normalize_order(order)
             if not info.get("order_id"):
@@ -363,6 +377,35 @@ class MarketMaker:
                         market_id,
                         token_id,
                         info.get("order_id"),
+                    )
+                continue
+            token_val = info.get("token_id")
+            if token_val is not None:
+                token_val = str(token_val)
+                info["token_id"] = token_val
+            if token_val and no_token_id_val and token_val == no_token_id_val:
+                if info.get("side") == "buy":
+                    info["side"] = "sell"
+                elif info.get("side") == "sell":
+                    info["side"] = "buy"
+                else:
+                    if self.log_decisions:
+                        self.logger.info(
+                            "sync skip unknown no_token side market=%s token=%s order_id=%s side=%s",
+                            market_id,
+                            token_id,
+                            info.get("order_id"),
+                            info.get("side"),
+                        )
+                    continue
+            elif token_val and token_val != token_id:
+                if self.log_decisions:
+                    self.logger.info(
+                        "sync skip unknown token market=%s token=%s order_id=%s order_token=%s",
+                        market_id,
+                        token_id,
+                        info.get("order_id"),
+                        token_val,
                     )
                 continue
             side = info.get("side")
@@ -466,9 +509,13 @@ class MarketMaker:
         replace_bps: float,
         proximity_bps: float,
         cancel_on_proximity: bool,
+        order_token_id: Optional[str] = None,
+        order_side: Optional[str] = None,
     ) -> None:
         key = _order_key(market_id, token_id, side)
         existing = self.state["orders"].get(key)
+        place_token_id = order_token_id or token_id
+        place_side = order_side if order_side in ("buy", "sell") else side
 
         if existing:
             existing_price = float(existing.get("price", 0))
@@ -555,39 +602,75 @@ class MarketMaker:
 
         try:
             if self.log_order_params:
-                self.logger.info(
-                    "place order market=%s token=%s side=%s price=%s size=%s",
-                    market_id,
-                    token_id,
-                    side,
-                    _fmt_float(desired_price),
-                    _fmt_float(size, 4),
-                )
+                if place_token_id != token_id or place_side != side:
+                    self.logger.info(
+                        "place order market=%s token=%s side=%s order_token=%s order_side=%s price=%s size=%s",
+                        market_id,
+                        token_id,
+                        side,
+                        place_token_id,
+                        place_side,
+                        _fmt_float(desired_price),
+                        _fmt_float(size, 4),
+                    )
+                else:
+                    self.logger.info(
+                        "place order market=%s token=%s side=%s price=%s size=%s",
+                        market_id,
+                        token_id,
+                        side,
+                        _fmt_float(desired_price),
+                        _fmt_float(size, 4),
+                    )
             t0 = time.perf_counter()
             order_id = self.executor.place_limit_order(
                 market_id=market_id,
-                token_id=token_id,
-                side="BUY" if side == "buy" else "SELL",
+                token_id=place_token_id,
+                side="BUY" if place_side == "buy" else "SELL",
                 price=format_price(desired_price),
                 size=size,
             )
-            self.logger.info(
-                "net place_order market=%s token=%s side=%s order_id=%s elapsed_ms=%.1f",
-                market_id,
-                token_id,
-                side,
-                order_id,
-                _elapsed_ms(t0),
-            )
+            if place_token_id != token_id or place_side != side:
+                self.logger.info(
+                    "net place_order market=%s token=%s side=%s order_token=%s order_side=%s order_id=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    side,
+                    place_token_id,
+                    place_side,
+                    order_id,
+                    _elapsed_ms(t0),
+                )
+            else:
+                self.logger.info(
+                    "net place_order market=%s token=%s side=%s order_id=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    side,
+                    order_id,
+                    _elapsed_ms(t0),
+                )
         except Exception as exc:
-            self.logger.warning(
-                "place failed market=%s token=%s side=%s err=%s elapsed_ms=%.1f",
-                market_id,
-                token_id,
-                side,
-                exc,
-                _elapsed_ms(t0),
-            )
+            if place_token_id != token_id or place_side != side:
+                self.logger.warning(
+                    "place failed market=%s token=%s side=%s order_token=%s order_side=%s err=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    side,
+                    place_token_id,
+                    place_side,
+                    exc,
+                    _elapsed_ms(t0),
+                )
+            else:
+                self.logger.warning(
+                    "place failed market=%s token=%s side=%s err=%s elapsed_ms=%.1f",
+                    market_id,
+                    token_id,
+                    side,
+                    exc,
+                    _elapsed_ms(t0),
+                )
             order_id = None
         self._schedule_order_sync_next_loop()
         if order_id:
@@ -700,7 +783,12 @@ class MarketMaker:
                 continue
 
             if do_sync:
-                result = self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
+                result = self._sync_open_orders(
+                    market_id=market_id,
+                    token_id=token_id,
+                    no_token_id=market.get("no_token_id"),
+                    sync_cfg=sync_cfg,
+                )
                 if result is not None:
                     sync_success = True
                     if result:
@@ -783,7 +871,8 @@ class MarketMaker:
 
             for side, existing in existing_orders.items():
                 existing_price = float(existing.get("price", 0))
-                if cancel_on_proximity and should_cancel_on_proximity(existing_price, ref_price, proximity_bps):
+                side_ref_price = _mapped_reference_price(side, ref_price)
+                if cancel_on_proximity and should_cancel_on_proximity(existing_price, side_ref_price, proximity_bps):
                     if self.log_decisions:
                         self.logger.info(
                             "cancel proximity market=%s token=%s side=%s order_id=%s existing_price=%s ref_price=%s proximity_bps=%s",
@@ -792,7 +881,7 @@ class MarketMaker:
                             side,
                             existing.get("order_id"),
                             _fmt_float(existing_price),
-                            _fmt_float(ref_price),
+                            _fmt_float(side_ref_price),
                             proximity_bps,
                         )
                     self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="proximity")
@@ -864,18 +953,50 @@ class MarketMaker:
                     cancel_on_proximity=cancel_on_proximity,
                 )
             elif target_side == "sell":
+                no_token_raw = market.get("no_token_id")
+                no_token_id = str(no_token_raw) if no_token_raw is not None else ""
+                mapped_price = _complement_price(desired_ask)
+                mapped_ref_price = _complement_price(ref_price)
+                if not no_token_id:
+                    if self.log_decisions:
+                        self.logger.info(
+                            "skip market=%s token=%s reason=missing_no_token_id",
+                            market_id,
+                            token_id,
+                        )
+                    continue
+                if mapped_price is None or mapped_price <= 0:
+                    if self.log_decisions:
+                        self.logger.info(
+                            "skip market=%s token=%s reason=invalid_no_price yes_ask=%s no_price=%s",
+                            market_id,
+                            token_id,
+                            _fmt_float(desired_ask),
+                            _fmt_float(mapped_price),
+                        )
+                    continue
                 if self.log_decisions:
                     self.logger.info("decision market=%s token=%s action=place_sell", market_id, token_id)
+                    self.logger.info(
+                        "sell mapped to buy_no market=%s token_yes=%s token_no=%s yes_ask=%s no_price=%s",
+                        market_id,
+                        token_id,
+                        no_token_id,
+                        _fmt_float(desired_ask),
+                        _fmt_float(mapped_price),
+                    )
                 self._update_order(
                     market_id=market_id,
                     token_id=token_id,
                     side="sell",
-                    desired_price=desired_ask,
+                    desired_price=mapped_price,
                     size=size,
-                    reference_price=ref_price,
+                    reference_price=mapped_ref_price,
                     replace_bps=replace_bps,
                     proximity_bps=proximity_bps,
                     cancel_on_proximity=cancel_on_proximity,
+                    order_token_id=no_token_id,
+                    order_side="buy",
                 )
             else:
                 if self.log_decisions:
