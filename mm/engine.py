@@ -425,6 +425,86 @@ class MarketMaker:
             desired_bid = price_at_level(book, "bid", level) or best_bid
             desired_ask = price_at_level(book, "ask", level) or best_ask
 
+            bid_depth = depth_at_levels(book, "bid", level)
+            ask_depth = depth_at_levels(book, "ask", level)
+
+            ref_price = _reference_price(reference, best_bid, best_ask)
+            if self.log_orderbook:
+                self.logger.info(
+                    "book market=%s token=%s best_bid=%s best_ask=%s desired_bid=%s desired_ask=%s bid_depth=%s ask_depth=%s ref_price=%s",
+                    market_id,
+                    token_id,
+                    _fmt_float(best_bid),
+                    _fmt_float(best_ask),
+                    _fmt_float(desired_bid),
+                    _fmt_float(desired_ask),
+                    _fmt_float(bid_depth, 4),
+                    _fmt_float(ask_depth, 4),
+                    _fmt_float(ref_price),
+                )
+
+            target_side = None
+            if ask_depth is None and bid_depth is None:
+                target_side = None
+            elif ask_depth is None:
+                target_side = "buy"
+            elif bid_depth is None:
+                target_side = "sell"
+            elif bid_depth >= ask_depth:
+                target_side = "buy"
+            else:
+                target_side = "sell"
+
+            existing_orders: Dict[str, Dict[str, Any]] = {}
+            for side in ("buy", "sell"):
+                key = _order_key(market_id, token_id, side)
+                existing = self.state.get("orders", {}).get(key)
+                if existing:
+                    existing_orders[side] = existing
+
+            for side, existing in existing_orders.items():
+                existing_price = float(existing.get("price", 0))
+                if cancel_on_proximity and should_cancel_on_proximity(existing_price, ref_price, proximity_bps):
+                    if self.log_decisions:
+                        self.logger.info(
+                            "cancel proximity market=%s token=%s side=%s order_id=%s existing_price=%s ref_price=%s proximity_bps=%s",
+                            market_id,
+                            token_id,
+                            side,
+                            existing.get("order_id"),
+                            _fmt_float(existing_price),
+                            _fmt_float(ref_price),
+                            proximity_bps,
+                        )
+                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="proximity")
+                    continue
+                if target_side is not None and side != target_side:
+                    if self.log_decisions:
+                        self.logger.info(
+                            "cancel depth_reversal market=%s token=%s side=%s order_id=%s target_side=%s",
+                            market_id,
+                            token_id,
+                            side,
+                            existing.get("order_id"),
+                            target_side,
+                        )
+                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="depth_reversal")
+
+            remaining_sides = []
+            for side in ("buy", "sell"):
+                key = _order_key(market_id, token_id, side)
+                if self.state.get("orders", {}).get(key):
+                    remaining_sides.append(side)
+            if remaining_sides:
+                if self.log_decisions:
+                    self.logger.info(
+                        "skip market=%s token=%s reason=existing_order sides=%s",
+                        market_id,
+                        token_id,
+                        ",".join(remaining_sides),
+                    )
+                continue
+
             if desired_bid is None or desired_ask is None:
                 if self.log_decisions:
                     self.logger.info(
@@ -445,33 +525,14 @@ class MarketMaker:
                         _fmt_float(desired_ask),
                     )
                 continue
-
-            bid_depth = depth_at_levels(book, "bid", level)
-            ask_depth = depth_at_levels(book, "ask", level)
             if bid_depth is None and ask_depth is None:
                 if self.log_decisions:
                     self.logger.info("skip market=%s token=%s reason=missing_depth", market_id, token_id)
                 continue
 
-            ref_price = _reference_price(reference, best_bid, best_ask)
-            if self.log_orderbook:
-                self.logger.info(
-                    "book market=%s token=%s best_bid=%s best_ask=%s desired_bid=%s desired_ask=%s bid_depth=%s ask_depth=%s ref_price=%s",
-                    market_id,
-                    token_id,
-                    _fmt_float(best_bid),
-                    _fmt_float(best_ask),
-                    _fmt_float(desired_bid),
-                    _fmt_float(desired_ask),
-                    _fmt_float(bid_depth, 4),
-                    _fmt_float(ask_depth, 4),
-                    _fmt_float(ref_price),
-                )
-
-            if ask_depth is None or (bid_depth is not None and bid_depth >= ask_depth):
+            if target_side == "buy":
                 if self.log_decisions:
-                    self.logger.info("decision market=%s token=%s action=place_buy cancel_side=sell", market_id, token_id)
-                self._cancel_order(market_id=market_id, token_id=token_id, side="sell", reason="opposite_side")
+                    self.logger.info("decision market=%s token=%s action=place_buy", market_id, token_id)
                 self._update_order(
                     market_id=market_id,
                     token_id=token_id,
@@ -483,10 +544,9 @@ class MarketMaker:
                     proximity_bps=proximity_bps,
                     cancel_on_proximity=cancel_on_proximity,
                 )
-            else:
+            elif target_side == "sell":
                 if self.log_decisions:
-                    self.logger.info("decision market=%s token=%s action=place_sell cancel_side=buy", market_id, token_id)
-                self._cancel_order(market_id=market_id, token_id=token_id, side="buy", reason="opposite_side")
+                    self.logger.info("decision market=%s token=%s action=place_sell", market_id, token_id)
                 self._update_order(
                     market_id=market_id,
                     token_id=token_id,
@@ -498,6 +558,9 @@ class MarketMaker:
                     proximity_bps=proximity_bps,
                     cancel_on_proximity=cancel_on_proximity,
                 )
+            else:
+                if self.log_decisions:
+                    self.logger.info("skip market=%s token=%s reason=missing_target_side", market_id, token_id)
 
         save_state(self.state_path, self.state)
         if self.log_state_changes:
