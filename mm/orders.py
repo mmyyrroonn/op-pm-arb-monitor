@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from opinion_clob_sdk import Client, CHAIN_ID_BNB_MAINNET
 from opinion_clob_sdk.chain.py_order_utils.model.order import PlaceOrderDataInput
@@ -59,6 +59,34 @@ class OpinionOrderExecutor:
     def cancel_all_orders(self) -> Dict[str, Any]:
         return self.client.cancel_all_orders()
 
+    def fetch_open_orders(
+        self,
+        *,
+        market_id: int,
+        status: str = "1",
+        limit: int = 20,
+        max_pages: int = 5,
+    ) -> List[Any]:
+        all_orders: List[Any] = []
+        page = 1
+        max_pages = max(1, int(max_pages))
+        limit = max(1, int(limit))
+        while page <= max_pages:
+            result = self.client.get_my_orders(
+                market_id=market_id,
+                status=status,
+                limit=limit,
+                page=page,
+            )
+            orders = self.client._parse_list_response(result, f"get open orders page {page}")
+            if not orders:
+                break
+            all_orders.extend(list(orders))
+            if len(orders) < limit:
+                break
+            page += 1
+        return all_orders
+
 
 def _extract_order_id(result: Any) -> Optional[str]:
     if result is None:
@@ -116,6 +144,76 @@ def _summarize_result(result: Any, limit: int = 800) -> str:
     if len(text) > limit:
         return text[:limit] + "...(truncated)"
     return text
+
+
+def _extract_field(obj: Any, keys: List[str]) -> Any:
+    if isinstance(obj, dict):
+        for key in keys:
+            if key in obj:
+                return obj.get(key)
+        return None
+    for key in keys:
+        if hasattr(obj, key):
+            return getattr(obj, key)
+    return None
+
+
+def _to_float(val: Any) -> Optional[float]:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_side(val: Any) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        text = val.strip().lower()
+        if text in ("buy", "bid", "b"):
+            return "buy"
+        if text in ("sell", "ask", "s"):
+            return "sell"
+        if text.isdigit():
+            return _normalize_side(int(text))
+        return None
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return None
+    if num == 0:
+        return "buy"
+    if num == 1:
+        return "buy"
+    if num == 2:
+        return "sell"
+    return None
+
+
+def normalize_order(order: Any) -> Dict[str, Any]:
+    side = _normalize_side(_extract_field(order, ["side", "orderSide", "order_side"]))
+    price = _to_float(_extract_field(order, ["price", "orderPrice", "order_price"]))
+    size = _to_float(
+        _extract_field(
+            order,
+            [
+                "makerAmountInBaseToken",
+                "maker_amount_in_base_token",
+                "makerAmount",
+                "maker_amount",
+                "amount",
+                "size",
+            ],
+        )
+    )
+    outcome = _extract_field(order, ["outcome", "outcomeSide", "outcome_side"])
+    return {
+        "order_id": _extract_order_id(order),
+        "side": side,
+        "price": price,
+        "size": size,
+        "outcome": outcome,
+    }
 
 
 def side_from_string(val: str) -> OrderSide:

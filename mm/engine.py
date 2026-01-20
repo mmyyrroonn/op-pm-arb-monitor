@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import resolve_secret
 from .market_data import OpinionFrontendClient, OpinionOpenApiClient
 from .market_selector import select_and_write
-from .orders import OpinionOrderExecutor
+from .orders import OpinionOrderExecutor, normalize_order
 from .quote import best_bid_ask, depth_at_levels, format_price, price_at_level, price_diff_bps
 from .risk import should_cancel_on_proximity
 from .state import load_state, save_state
@@ -224,6 +224,109 @@ class MarketMaker:
             reason,
         )
 
+    def _sync_open_orders(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        sync_cfg: Dict[str, Any],
+    ) -> None:
+        if not sync_cfg.get("enabled", False):
+            return
+        status = str(sync_cfg.get("status", "1"))
+        limit = int(sync_cfg.get("limit", 20))
+        max_pages = int(sync_cfg.get("max_pages", 3))
+        try:
+            orders = self.executor.fetch_open_orders(
+                market_id=market_id,
+                status=status,
+                limit=limit,
+                max_pages=max_pages,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "open orders sync failed market=%s token=%s err=%s",
+                market_id,
+                token_id,
+                exc,
+            )
+            return
+
+        normalized = []
+        for order in orders:
+            info = normalize_order(order)
+            if not info.get("order_id"):
+                continue
+            if info.get("price") is None:
+                if self.log_decisions:
+                    self.logger.info(
+                        "sync skip missing price market=%s token=%s order_id=%s",
+                        market_id,
+                        token_id,
+                        info.get("order_id"),
+                    )
+                continue
+            side = info.get("side")
+            if side not in ("buy", "sell"):
+                if self.log_decisions:
+                    self.logger.info(
+                        "sync skip unknown side market=%s token=%s order_id=%s side=%s",
+                        market_id,
+                        token_id,
+                        info.get("order_id"),
+                        side,
+                    )
+                continue
+            normalized.append(info)
+
+        existing_by_id: Dict[str, str] = {}
+        for side in ("buy", "sell"):
+            key = _order_key(market_id, token_id, side)
+            existing = self.state.get("orders", {}).get(key)
+            if existing and existing.get("order_id"):
+                existing_by_id[str(existing["order_id"])] = side
+
+        new_orders: Dict[str, Dict[str, Any]] = {}
+        duplicates = 0
+        for info in normalized:
+            side = existing_by_id.get(str(info["order_id"]), info["side"])
+            if side not in ("buy", "sell"):
+                continue
+            info["side"] = side
+            key = _order_key(market_id, token_id, side)
+            if key in new_orders:
+                duplicates += 1
+                continue
+            new_orders[key] = info
+        if duplicates and self.log_decisions:
+            self.logger.info(
+                "sync duplicate orders market=%s token=%s skipped=%d",
+                market_id,
+                token_id,
+                duplicates,
+            )
+
+        for side in ("buy", "sell"):
+            key = _order_key(market_id, token_id, side)
+            existing = self.state.get("orders", {}).get(key)
+            if existing and key not in new_orders:
+                self.state["orders"].pop(key, None)
+                self._log_state_remove(key, existing, "sync_missing")
+
+        for key, info in new_orders.items():
+            existing = self.state.get("orders", {}).get(key)
+            if existing and existing.get("order_id") == info["order_id"]:
+                existing["price"] = info["price"]
+                if info.get("size") is not None:
+                    existing["size"] = info["size"]
+                continue
+            self.state["orders"][key] = {
+                "order_id": info["order_id"],
+                "price": info["price"],
+                "size": info.get("size"),
+            }
+            self._log_state_add(key, self.state["orders"][key])
+
     def _update_order(
         self,
         *,
@@ -366,6 +469,7 @@ class MarketMaker:
         self._maybe_switch_markets()
         quote_cfg = self.config.get("quote", {})
         risk_cfg = self.config.get("risk", {})
+        sync_cfg = self.config.get("order_sync", {})
 
         level = int(quote_cfg.get("orderbook_level", 5))
         size = float(quote_cfg.get("size_per_side", 10.0))
@@ -401,6 +505,8 @@ class MarketMaker:
                 if self.log_decisions:
                     self.logger.info("skip market=%s reason=missing_token_id", market_id)
                 continue
+
+            self._sync_open_orders(market_id=market_id, token_id=token_id, sync_cfg=sync_cfg)
 
             try:
                 if isinstance(self.data_client, OpinionFrontendClient):

@@ -30,6 +30,12 @@
     "proximity_bps": 2,
     "reference_price": "mid"
   },
+  "order_sync": {
+    "enabled": true,
+    "status": "1",
+    "limit": 20,
+    "max_pages": 3
+  },
   "opinion": {
     "host": "https://proxy.opinion.trade:8443",
     "chain_id": 56,
