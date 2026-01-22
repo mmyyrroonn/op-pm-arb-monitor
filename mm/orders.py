@@ -184,14 +184,27 @@ def _normalize_side(val: Any) -> Optional[str]:
     if num == 0:
         return "buy"
     if num == 1:
-        return "sell"
+        return "buy"
     if num == 2:
         return "sell"
     return None
 
 
 def normalize_order(order: Any) -> Dict[str, Any]:
-    side = _normalize_side(_extract_field(order, ["side", "orderSide", "order_side"]))
+    side = _normalize_side(
+        _extract_field(
+            order,
+            [
+                "sideEnum",
+                "side_enum",
+                "orderSideEnum",
+                "order_side_enum",
+                "side",
+                "orderSide",
+                "order_side",
+            ],
+        )
+    )
     price = _to_float(_extract_field(order, ["price", "orderPrice", "order_price"]))
     size = _to_float(
         _extract_field(
