@@ -1074,8 +1074,7 @@ def main() -> int:
         print(json.dumps({"count": len(merged), "output": args.merged_output}, ensure_ascii=True, indent=2))
         return 0
 
-    if args.fetch_depth:
-        topics_raw = load_cached(args.topics_input)
+    def _run_depth_fetch(topics_raw: Any) -> int:
         if topics_raw is None:
             print(json.dumps({"error": "topics file not found"}, ensure_ascii=True, indent=2))
             return 1
@@ -1152,6 +1151,10 @@ def main() -> int:
             print(json.dumps({"stopped": True}, ensure_ascii=True, indent=2))
         return 0
 
+    if args.fetch_depth and not args.refresh:
+        topics_raw = load_cached(args.topics_input)
+        return _run_depth_fetch(topics_raw)
+
     if not args.refresh:
         cached = load_cached(args.output)
         if cached is not None:
@@ -1183,6 +1186,8 @@ def main() -> int:
     merged = merge_cached_items(data)
     save_json(args.output, merged)
     print(json.dumps(merged, ensure_ascii=True, indent=2))
+    if args.fetch_depth:
+        return _run_depth_fetch(merged)
     return 0
 
 

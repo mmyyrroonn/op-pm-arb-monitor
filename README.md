@@ -319,6 +319,12 @@ python opinion_frontend_fetch.py --max-pages 200 --merge-cached --merged-output 
 python opinion_frontend_fetch.py --fetch-depth --topics-input opinion_topics_merged.json --depth-ui-output opinion_depth_ui.json
 ```
 
+示例（刷新话题并顺便抓深度）：
+
+```bash
+python opinion_frontend_fetch.py --refresh --fetch-depth --depth-output opinion_depth_cache.json
+```
+
 ### `opinion_depth_tui.py`
 
 ```bash
@@ -340,6 +346,7 @@ python opinion_depth_tui.py --input opinion_depth_ui.json
 ### `scripts/run_market_selector.py`
 
 读取 `mm_config.json` 的 `market_selector`，根据话题列表筛选市场并写入 `selected_markets.json`。
+如需按深度筛选，先用 `opinion_frontend_fetch.py --fetch-depth` 生成 `opinion_depth_cache.json`，再配置 `depth_min_*` 参数。
 
 ```bash
 python scripts/run_market_selector.py --config mm_config.json
@@ -357,7 +364,7 @@ python scripts/run_mm.py --config mm_config.json
 
 ## `mm_config.json` 配置说明（做市）
 
-- `market_selector`：`source_file`/`output_file`/`market_pairs_file`/`require_market_pairs`/`price_target`/`price_tolerance`/`volume_percentile_min`/`volume_percentile_max`/`max_markets`/`auto_run_on_missing`
+- `market_selector`：`source_file`/`output_file`/`market_pairs_file`/`require_market_pairs`/`price_target`/`price_tolerance`/`volume_percentile_min`/`volume_percentile_max`/`depth_source_file`/`depth_levels`/`depth_min_notional`/`depth_min_size`/`depth_token_side`/`max_markets`/`auto_run_on_missing`
 - `market_switch`：`enabled`/`interval_seconds`/`cancel_all_on_switch`/`run_selector_on_switch`
 - `quote`：`price_source`/`orderbook_level`/`token_side`/`size_per_side`/`min_size`/`min_depth_usd`/`replace_bps`
 - `risk`：`cancel_on_price_proximity`/`proximity_bps`/`reference_price`

@@ -9,6 +9,11 @@
     "price_tolerance": 0.2,
     "volume_percentile_min": 0.1,
     "volume_percentile_max": 0.3,
+    "depth_source_file": "opinion_depth_cache.json",
+    "depth_levels": 5,
+    "depth_min_notional": 0,
+    "depth_min_size": 0,
+    "depth_token_side": "yes",
     "max_markets": 2
   },
   "market_switch": {

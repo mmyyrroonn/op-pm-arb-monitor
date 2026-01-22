@@ -88,6 +88,15 @@ def _format_volume(val: Any) -> str:
     return text
 
 
+def _format_depth(val: Any) -> str:
+    try:
+        num = float(val)
+    except Exception:
+        return "N/A"
+    text = f"{num:,.3f}".rstrip("0").rstrip(".")
+    return text
+
+
 def _print_table(rows: List[Dict[str, str]], headers: List[str]) -> None:
     widths = {h: len(h) for h in headers}
     for row in rows:
@@ -109,6 +118,17 @@ def main() -> None:
     selected = select_and_write(cfg)
     selector_cfg = cfg.get("market_selector", {})
     source_file = selector_cfg.get("source_file", "opinion_topics_merged.json")
+    depth_source = selector_cfg.get("depth_source_file", "")
+    depth_min_notional = float(selector_cfg.get("depth_min_notional", 0.0))
+    depth_min_size = float(selector_cfg.get("depth_min_size", 0.0))
+    use_notional = True
+    if depth_min_notional <= 0 and depth_min_size > 0:
+        use_notional = False
+    if depth_min_notional > 0 or depth_min_size > 0:
+        if not depth_source:
+            print("[WARN] depth filter enabled but depth_source_file is empty")
+        elif not os.path.exists(depth_source):
+            print(f"[WARN] depth filter enabled but missing file: {depth_source}")
 
     with open(source_file, "r", encoding="utf-8") as f:
         topics = json.load(f)
@@ -122,6 +142,17 @@ def main() -> None:
 
     now = time.time()
     rows: List[Dict[str, str]] = []
+    depth_headers: List[str] = []
+    depth_bid_key = "depth_bid_notional" if use_notional else "depth_bid_size"
+    depth_ask_key = "depth_ask_notional" if use_notional else "depth_ask_size"
+    if any(
+        entry.get(depth_bid_key) is not None or entry.get(depth_ask_key) is not None
+        for entry in selected
+    ):
+        if use_notional:
+            depth_headers = ["bid_depth", "ask_depth"]
+        else:
+            depth_headers = ["bid_size", "ask_size"]
     for entry in selected:
         topic_id = str(entry.get("topicId") or "")
         cutoff = cutoff_map.get(topic_id, 0)
@@ -135,10 +166,20 @@ def main() -> None:
                 "market_name": market_name,
                 "last_price": _format_float(entry.get("price")),
                 "volume": _format_volume(entry.get("volume")),
+                **(
+                    {
+                        depth_headers[0]: _format_depth(entry.get(depth_bid_key)),
+                        depth_headers[1]: _format_depth(entry.get(depth_ask_key)),
+                    }
+                    if depth_headers
+                    else {}
+                ),
             }
         )
     if rows:
-        _print_table(rows, ["settle_time", "time_to_settle", "market_name", "last_price", "volume"])
+        headers = ["settle_time", "time_to_settle", "market_name", "last_price", "volume"]
+        headers.extend(depth_headers)
+        _print_table(rows, headers)
 
 
 if __name__ == "__main__":
