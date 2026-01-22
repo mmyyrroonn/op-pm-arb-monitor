@@ -555,10 +555,28 @@ class MarketMaker:
                         info.get("order_id"),
                     )
                 continue
+            order_market_id = info.get("market_id")
+            if order_market_id not in (None, "", 0, "0"):
+                if str(order_market_id) != str(market_id):
+                    continue
             token_val = info.get("token_id")
             if token_val is not None:
                 token_val = str(token_val)
                 info["token_id"] = token_val
+            if not token_val:
+                outcome = info.get("outcome")
+                if outcome == "yes":
+                    token_val = token_id
+                elif outcome == "no":
+                    if no_token_id_val:
+                        token_val = no_token_id_val
+                    else:
+                        if info.get("side") == "buy":
+                            info["side"] = "sell"
+                        elif info.get("side") == "sell":
+                            info["side"] = "buy"
+                if token_val:
+                    info["token_id"] = token_val
             if token_val and no_token_id_val and token_val == no_token_id_val:
                 if info.get("side") == "buy":
                     info["side"] = "sell"

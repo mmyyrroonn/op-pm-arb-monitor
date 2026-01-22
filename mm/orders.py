@@ -230,6 +230,31 @@ def _normalize_side(val: Any) -> Optional[str]:
     return None
 
 
+def _normalize_outcome(val: Any) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, str):
+        text = val.strip().lower()
+        if not text:
+            return None
+        if text in ("yes", "y", "true"):
+            return "yes"
+        if text in ("no", "n", "false"):
+            return "no"
+        if text.isdigit():
+            return _normalize_outcome(int(text))
+        return None
+    try:
+        num = int(val)
+    except (TypeError, ValueError):
+        return None
+    if num == 1:
+        return "yes"
+    if num == 2:
+        return "no"
+    return None
+
+
 def normalize_order(order: Any) -> Dict[str, Any]:
     side = _normalize_side(
         _extract_field(
@@ -260,7 +285,21 @@ def normalize_order(order: Any) -> Dict[str, Any]:
         )
     )
     token_id = _extract_field(order, ["tokenId", "token_id", "tokenID"])
-    outcome = _extract_field(order, ["outcome", "outcomeSide", "outcome_side"])
+    outcome = _normalize_outcome(
+        _extract_field(
+            order,
+            [
+                "outcomeSideEnum",
+                "outcome_side_enum",
+                "outcomeEnum",
+                "outcome_enum",
+                "outcomeSide",
+                "outcome_side",
+                "outcome",
+            ],
+        )
+    )
+    market_id = _extract_field(order, ["marketId", "market_id", "marketID", "topicId", "topic_id"])
     return {
         "order_id": _extract_order_id(order),
         "side": side,
@@ -268,6 +307,7 @@ def normalize_order(order: Any) -> Dict[str, Any]:
         "size": size,
         "token_id": token_id,
         "outcome": outcome,
+        "market_id": market_id,
     }
 
 
