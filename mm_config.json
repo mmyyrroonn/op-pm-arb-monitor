@@ -38,6 +38,20 @@
     "limit": 20,
     "max_pages": 3
   },
+  "logging": {
+    "enabled": true,
+    "level": "INFO",
+    "console_level": "INFO",
+    "file_level": "INFO",
+    "format": "%(asctime)s [%(levelname)s] %(message)s",
+    "datefmt": "%Y-%m-%d %H:%M:%S",
+    "file_enabled": true,
+    "file": "mm_info.log",
+    "log_orderbook": true,
+    "log_state_changes": true,
+    "log_order_params": true,
+    "log_decisions": true
+  },
   "opinion": {
     "host": "https://proxy.opinion.trade:8443",
     "chain_id": 56,
