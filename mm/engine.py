@@ -173,6 +173,15 @@ class MarketMaker:
         self._order_sync_backoff_factor = max(1.0, backoff_factor)
         self._order_sync_interval = self._order_sync_max_interval
         self._order_sync_next_loop = 0
+        self._precheck_on_place = bool(self._order_sync_cfg.get("precheck_on_place", True))
+        try:
+            self._precheck_cache_seconds = float(self._order_sync_cfg.get("precheck_cache_seconds", 2.0))
+        except (TypeError, ValueError):
+            self._precheck_cache_seconds = 2.0
+        self._last_open_orders: Optional[List[Any]] = None
+        self._last_open_orders_ts = 0.0
+        self._last_open_orders_loop = -1
+        self._last_open_orders_market_id: Optional[int] = None
 
         op_cfg = config.get("opinion", {})
         api_key = resolve_secret(op_cfg, "api_key", op_cfg.get("api_key_env", ""))
@@ -263,6 +272,11 @@ class MarketMaker:
                 self._order_sync_min_interval,
                 self._order_sync_max_interval,
                 self._order_sync_backoff_factor,
+            )
+        if self._precheck_on_place:
+            self.logger.info(
+                "order precheck enabled cache_seconds=%s",
+                self._precheck_cache_seconds,
             )
 
     def _load_or_select_markets(self) -> None:
@@ -574,10 +588,19 @@ class MarketMaker:
         new_orders: Dict[str, Dict[str, Any]] = {}
         duplicates = 0
         for info in normalized:
-            side = existing_by_id.get(str(info["order_id"]), info["side"])
-            if side not in ("buy", "sell"):
-                continue
-            info["side"] = side
+            side = info["side"]
+            order_id = str(info["order_id"])
+            existing_side = existing_by_id.get(order_id)
+            if existing_side and existing_side != side:
+                if self.log_decisions:
+                    self.logger.trace(
+                        "sync side mismatch market=%s token=%s order_id=%s state_side=%s cloud_side=%s",
+                        market_id,
+                        token_id,
+                        order_id,
+                        existing_side,
+                        side,
+                    )
             key = _order_key(market_id, token_id, side)
             if key in new_orders:
                 duplicates += 1
@@ -614,6 +637,25 @@ class MarketMaker:
         curr_snapshot = self._snapshot_orders(market_id, token_id)
         return prev_snapshot != curr_snapshot
 
+    def _cache_open_orders(self, orders: List[Any], market_id: int) -> None:
+        self._last_open_orders = orders
+        self._last_open_orders_ts = time.time()
+        self._last_open_orders_loop = self.loop_count
+        self._last_open_orders_market_id = market_id
+
+    def _get_cached_open_orders(self, market_id: int) -> Optional[List[Any]]:
+        if not self._last_open_orders:
+            return None
+        if self._last_open_orders_market_id not in (0, market_id):
+            return None
+        if self.loop_count == self._last_open_orders_loop:
+            return self._last_open_orders
+        if self._precheck_cache_seconds <= 0:
+            return None
+        if (time.time() - self._last_open_orders_ts) <= self._precheck_cache_seconds:
+            return self._last_open_orders
+        return None
+
     def _fetch_open_orders(self, sync_cfg: Dict[str, Any]) -> Optional[List[Any]]:
         if not sync_cfg.get("enabled", False):
             return None
@@ -640,7 +682,73 @@ class MarketMaker:
             len(orders),
             _elapsed_ms(t0),
         )
+        self._cache_open_orders(orders, market_id=0)
         return orders
+
+    def _fetch_open_orders_for_market(self, market_id: int, sync_cfg: Dict[str, Any]) -> Optional[List[Any]]:
+        status = str(sync_cfg.get("status", "1"))
+        limit = int(sync_cfg.get("limit", 20))
+        max_pages = int(sync_cfg.get("max_pages", 3))
+        t0 = time.perf_counter()
+        try:
+            orders = self.executor.fetch_open_orders(
+                market_id=market_id,
+                status=status,
+                limit=limit,
+                max_pages=max_pages,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "net fetch_open_orders failed market=%s token=all err=%s elapsed_ms=%.1f",
+                market_id,
+                exc,
+                _elapsed_ms(t0),
+            )
+            return None
+        self.logger.trace(
+            "net fetch_open_orders market=%s token=all count=%d elapsed_ms=%.1f",
+            market_id,
+            len(orders),
+            _elapsed_ms(t0),
+        )
+        self._cache_open_orders(orders, market_id=market_id)
+        return orders
+
+    def _precheck_open_orders(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        no_token_id: Optional[str],
+        side: str,
+    ) -> bool:
+        if not self._precheck_on_place:
+            return False
+        key = _order_key(market_id, token_id, side)
+        if self.state.get("orders", {}).get(key):
+            return True
+        orders = self._get_cached_open_orders(market_id)
+        if orders is None:
+            orders = self._fetch_open_orders_for_market(market_id, self._order_sync_cfg)
+        if not orders:
+            return False
+        self._sync_open_orders(
+            market_id=market_id,
+            token_id=token_id,
+            no_token_id=no_token_id,
+            orders=orders,
+            sync_cfg={"enabled": True},
+        )
+        existing = self.state.get("orders", {}).get(key)
+        if existing and self.log_decisions:
+            self.logger.trace(
+                "precheck found order market=%s token=%s side=%s order_id=%s",
+                market_id,
+                token_id,
+                side,
+                existing.get("order_id"),
+            )
+        return bool(existing)
 
     def _order_sync_due(self) -> bool:
         if not self._order_sync_enabled:
@@ -682,9 +790,18 @@ class MarketMaker:
         cancel_on_proximity: bool,
         order_token_id: Optional[str] = None,
         order_side: Optional[str] = None,
+        no_token_id: Optional[str] = None,
     ) -> None:
         key = _order_key(market_id, token_id, side)
         existing = self.state["orders"].get(key)
+        if not existing:
+            self._precheck_open_orders(
+                market_id=market_id,
+                token_id=token_id,
+                no_token_id=no_token_id,
+                side=side,
+            )
+            existing = self.state["orders"].get(key)
         place_token_id = order_token_id or token_id
         place_side = order_side if order_side in ("buy", "sell") else side
 
@@ -989,6 +1106,8 @@ class MarketMaker:
                 if self.log_decisions:
                     self.logger.trace("skip market=%s reason=missing_token_id", market_id)
                 continue
+            no_token_raw = market.get("no_token_id")
+            no_token_id = str(no_token_raw) if no_token_raw is not None else ""
 
             if do_sync and sync_orders is not None:
                 result = self._sync_open_orders(
@@ -1181,6 +1300,7 @@ class MarketMaker:
                     replace_bps=replace_bps,
                     proximity_bps=proximity_bps,
                     cancel_on_proximity=cancel_on_proximity,
+                    no_token_id=no_token_id or None,
                 )
             elif desired_bid is not None and desired_bid > 0 and spread_valid and not bid_depth_ok:
                 if self.log_decisions:
@@ -1192,8 +1312,6 @@ class MarketMaker:
                         _fmt_float(min_depth_usd, 2),
                     )
 
-            no_token_raw = market.get("no_token_id")
-            no_token_id = str(no_token_raw) if no_token_raw is not None else ""
             if desired_ask is not None and desired_ask > 0 and spread_valid and ask_depth_ok:
                 mapped_price = mapped_ask_price
                 if not no_token_id:
@@ -1235,6 +1353,7 @@ class MarketMaker:
                         cancel_on_proximity=cancel_on_proximity,
                         order_token_id=no_token_id,
                         order_side="buy",
+                        no_token_id=no_token_id or None,
                     )
             elif desired_ask is not None and desired_ask > 0 and spread_valid and not ask_depth_ok:
                 if self.log_decisions:

@@ -184,7 +184,7 @@ def _normalize_side(val: Any) -> Optional[str]:
     if num == 0:
         return "buy"
     if num == 1:
-        return "buy"
+        return "sell"
     if num == 2:
         return "sell"
     return None
