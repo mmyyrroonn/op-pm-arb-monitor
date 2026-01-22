@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -62,24 +63,69 @@ def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
 
 
+TRACE_LEVEL = 5
+
+
+def _ensure_trace_level() -> None:
+    if hasattr(logging, "TRACE"):
+        return
+    logging.TRACE = TRACE_LEVEL  # type: ignore[attr-defined]
+    logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+    def trace(self: logging.Logger, msg: str, *args: Any, **kwargs: Any) -> None:
+        if self.isEnabledFor(TRACE_LEVEL):
+            self._log(TRACE_LEVEL, msg, args, **kwargs)
+
+    logging.Logger.trace = trace  # type: ignore[assignment]
+
+
+def _resolve_level(value: Any, default: int = logging.INFO) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        name = value.strip().upper()
+        if name == "TRACE":
+            return TRACE_LEVEL
+        return getattr(logging, name, default)
+    return default
+
+
 def _logging_config(config: Dict[str, Any]) -> Dict[str, Any]:
     raw = config.get("logging", {})
     return raw if isinstance(raw, dict) else {}
 
 
 def _setup_logger(config: Dict[str, Any]) -> logging.Logger:
+    _ensure_trace_level()
     log_cfg = _logging_config(config)
     logger = logging.getLogger("mm.engine")
     if getattr(logger, "_configured", False):
         return logger
-    level_name = str(log_cfg.get("level", "INFO")).upper()
-    level = getattr(logging, level_name, logging.INFO)
-    logger.setLevel(level)
+    level_name = log_cfg.get("level", "INFO")
+    console_level_name = log_cfg.get("console_level", level_name)
+    file_level_name = log_cfg.get("file_level", "INFO")
+    logger_level = min(
+        _resolve_level(level_name),
+        _resolve_level(console_level_name),
+        _resolve_level(file_level_name),
+    )
+    logger.setLevel(logger_level)
     handler = logging.StreamHandler()
     fmt = log_cfg.get("format", "%(asctime)s [%(levelname)s] %(message)s")
     datefmt = log_cfg.get("datefmt", "%Y-%m-%d %H:%M:%S")
     handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+    handler.setLevel(_resolve_level(console_level_name, logger_level))
     logger.addHandler(handler)
+    file_enabled = bool(log_cfg.get("file_enabled", True))
+    file_path = str(log_cfg.get("file", "mm_info.log")) if file_enabled else ""
+    if file_enabled and file_path:
+        dir_name = os.path.dirname(file_path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+        file_handler = logging.FileHandler(file_path, encoding="utf-8")
+        file_handler.setLevel(_resolve_level(file_level_name, logging.INFO))
+        file_handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+        logger.addHandler(file_handler)
     logger.propagate = False
     logger.disabled = not bool(log_cfg.get("enabled", True))
     setattr(logger, "_configured", True)
@@ -277,7 +323,7 @@ class MarketMaker:
         if not self.state.get("orders"):
             return
         if self.log_state_changes:
-            self.logger.info(
+            self.logger.trace(
                 "state clear orders=%d reason=%s",
                 len(self.state.get("orders", {})),
                 reason,
@@ -289,7 +335,7 @@ class MarketMaker:
             return
         price_val = _fmt_float(_to_float(order.get("price")))
         size_val = _fmt_float(_to_float(order.get("size")), 4)
-        self.logger.info(
+        self.logger.trace(
             "state add key=%s order_id=%s price=%s size=%s",
             key,
             order.get("order_id"),
@@ -302,13 +348,93 @@ class MarketMaker:
             return
         price_val = _fmt_float(_to_float(order.get("price")))
         size_val = _fmt_float(_to_float(order.get("size")), 4)
-        self.logger.info(
+        self.logger.trace(
             "state remove key=%s order_id=%s price=%s size=%s reason=%s",
             key,
             order.get("order_id"),
             price_val,
             size_val,
             reason,
+        )
+
+    def _log_order_success(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        side: str,
+        order_id: str,
+        order_token_id: Optional[str] = None,
+        order_side: Optional[str] = None,
+    ) -> None:
+        if order_token_id and order_token_id != token_id:
+            self.logger.info(
+                "order ok market=%s token=%s side=%s order_token=%s order_side=%s order_id=%s",
+                market_id,
+                token_id,
+                side,
+                order_token_id,
+                order_side,
+                order_id,
+            )
+            return
+        if order_side and order_side != side:
+            self.logger.info(
+                "order ok market=%s token=%s side=%s order_token=%s order_side=%s order_id=%s",
+                market_id,
+                token_id,
+                side,
+                order_token_id or token_id,
+                order_side,
+                order_id,
+            )
+            return
+        self.logger.info(
+            "order ok market=%s token=%s side=%s order_id=%s",
+            market_id,
+            token_id,
+            side,
+            order_id,
+        )
+
+    def _log_cancel_success(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        side: str,
+        order_id: Optional[str],
+        reason: str,
+    ) -> None:
+        self.logger.info(
+            "cancel ok market=%s token=%s side=%s order_id=%s reason=%s",
+            market_id,
+            token_id,
+            side,
+            order_id,
+            reason,
+        )
+
+    def _log_risk_cancel(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        side: str,
+        order_id: Optional[str],
+        order_price: Optional[float],
+        reference_price: Optional[float],
+        proximity_bps: float,
+    ) -> None:
+        self.logger.info(
+            "risk cancel proximity market=%s token=%s side=%s order_id=%s price=%s ref_price=%s proximity_bps=%s",
+            market_id,
+            token_id,
+            side,
+            order_id,
+            _fmt_float(order_price),
+            _fmt_float(reference_price),
+            _fmt_float(proximity_bps, 2),
         )
 
     def _snapshot_orders(self, market_id: int, token_id: str) -> Dict[str, Tuple[str, Optional[float], Optional[float]]]:
@@ -346,7 +472,7 @@ class MarketMaker:
                 continue
             if info.get("price") is None:
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "sync skip missing price market=%s token=%s order_id=%s",
                         market_id,
                         token_id,
@@ -364,7 +490,7 @@ class MarketMaker:
                     info["side"] = "buy"
                 else:
                     if self.log_decisions:
-                        self.logger.info(
+                        self.logger.trace(
                             "sync skip unknown no_token side market=%s token=%s order_id=%s side=%s",
                             market_id,
                             token_id,
@@ -374,7 +500,7 @@ class MarketMaker:
                     continue
             elif token_val and token_val != token_id:
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "sync skip unknown token market=%s token=%s order_id=%s order_token=%s",
                         market_id,
                         token_id,
@@ -385,7 +511,7 @@ class MarketMaker:
             side = info.get("side")
             if side not in ("buy", "sell"):
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "sync skip unknown side market=%s token=%s order_id=%s side=%s",
                         market_id,
                         token_id,
@@ -415,7 +541,7 @@ class MarketMaker:
                 continue
             new_orders[key] = info
         if duplicates and self.log_decisions:
-            self.logger.info(
+            self.logger.trace(
                 "sync duplicate orders market=%s token=%s skipped=%d",
                 market_id,
                 token_id,
@@ -466,7 +592,7 @@ class MarketMaker:
                 _elapsed_ms(t0),
             )
             return None
-        self.logger.info(
+        self.logger.trace(
             "net fetch_open_orders market=all token=all count=%d elapsed_ms=%.1f",
             len(orders),
             _elapsed_ms(t0),
@@ -523,7 +649,7 @@ class MarketMaker:
             existing_price = float(existing.get("price", 0))
             if cancel_on_proximity and should_cancel_on_proximity(existing_price, reference_price, proximity_bps):
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "cancel proximity market=%s token=%s side=%s order_id=%s existing_price=%s ref_price=%s proximity_bps=%s",
                         market_id,
                         token_id,
@@ -533,15 +659,31 @@ class MarketMaker:
                         _fmt_float(reference_price),
                         proximity_bps,
                     )
+                self._log_risk_cancel(
+                    market_id=market_id,
+                    token_id=token_id,
+                    side=side,
+                    order_id=existing.get("order_id"),
+                    order_price=existing_price,
+                    reference_price=reference_price,
+                    proximity_bps=proximity_bps,
+                )
                 try:
                     t0 = time.perf_counter()
                     self.executor.cancel_order(existing["order_id"])
-                    self.logger.info(
+                    self.logger.trace(
                         "net cancel_order market=%s token=%s order_id=%s elapsed_ms=%.1f",
                         market_id,
                         token_id,
                         existing.get("order_id"),
                         _elapsed_ms(t0),
+                    )
+                    self._log_cancel_success(
+                        market_id=market_id,
+                        token_id=token_id,
+                        side=side,
+                        order_id=existing.get("order_id"),
+                        reason="proximity",
                     )
                 except Exception as exc:
                     self.logger.warning(
@@ -558,7 +700,7 @@ class MarketMaker:
             diff_bps = price_diff_bps(existing_price, desired_price)
             if diff_bps < replace_bps:
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "skip replace market=%s token=%s side=%s existing_price=%s desired_price=%s diff_bps=%s replace_bps=%s",
                         market_id,
                         token_id,
@@ -570,7 +712,7 @@ class MarketMaker:
                     )
                 return
             if self.log_decisions:
-                self.logger.info(
+                self.logger.trace(
                     "replace order market=%s token=%s side=%s existing_price=%s desired_price=%s diff_bps=%s replace_bps=%s",
                     market_id,
                     token_id,
@@ -583,12 +725,19 @@ class MarketMaker:
             try:
                 t0 = time.perf_counter()
                 self.executor.cancel_order(existing["order_id"])
-                self.logger.info(
+                self.logger.trace(
                     "net cancel_order market=%s token=%s order_id=%s elapsed_ms=%.1f",
                     market_id,
                     token_id,
                     existing.get("order_id"),
                     _elapsed_ms(t0),
+                )
+                self._log_cancel_success(
+                    market_id=market_id,
+                    token_id=token_id,
+                    side=side,
+                    order_id=existing.get("order_id"),
+                    reason="replace",
                 )
             except Exception as exc:
                 self.logger.warning(
@@ -605,7 +754,7 @@ class MarketMaker:
         try:
             if self.log_order_params:
                 if place_token_id != token_id or place_side != side:
-                    self.logger.info(
+                    self.logger.trace(
                         "place order market=%s token=%s side=%s order_token=%s order_side=%s price=%s size=%s",
                         market_id,
                         token_id,
@@ -616,7 +765,7 @@ class MarketMaker:
                         _fmt_float(size, 4),
                     )
                 else:
-                    self.logger.info(
+                    self.logger.trace(
                         "place order market=%s token=%s side=%s price=%s size=%s",
                         market_id,
                         token_id,
@@ -633,7 +782,7 @@ class MarketMaker:
                 size=size,
             )
             if place_token_id != token_id or place_side != side:
-                self.logger.info(
+                self.logger.trace(
                     "net place_order market=%s token=%s side=%s order_token=%s order_side=%s order_id=%s elapsed_ms=%.1f",
                     market_id,
                     token_id,
@@ -644,7 +793,7 @@ class MarketMaker:
                     _elapsed_ms(t0),
                 )
             else:
-                self.logger.info(
+                self.logger.trace(
                     "net place_order market=%s token=%s side=%s order_id=%s elapsed_ms=%.1f",
                     market_id,
                     token_id,
@@ -682,21 +831,21 @@ class MarketMaker:
                 "size": size,
             }
             self._log_state_add(key, self.state["orders"][key])
-            if self.log_order_params:
-                self.logger.info(
-                    "place ok market=%s token=%s side=%s order_id=%s",
-                    market_id,
-                    token_id,
-                    side,
-                    order_id,
-                )
+            self._log_order_success(
+                market_id=market_id,
+                token_id=token_id,
+                side=side,
+                order_id=order_id,
+                order_token_id=place_token_id,
+                order_side=place_side,
+            )
 
     def _cancel_order(self, *, market_id: int, token_id: str, side: str, reason: str = "cancel") -> None:
         key = _order_key(market_id, token_id, side)
         existing = self.state["orders"].get(key)
         if not existing:
             if self.log_decisions:
-                self.logger.info(
+                self.logger.trace(
                     "cancel skip market=%s token=%s side=%s reason=missing",
                     market_id,
                     token_id,
@@ -704,7 +853,7 @@ class MarketMaker:
                 )
             return
         if self.log_order_params:
-            self.logger.info(
+            self.logger.trace(
                 "cancel order market=%s token=%s side=%s order_id=%s",
                 market_id,
                 token_id,
@@ -724,12 +873,19 @@ class MarketMaker:
                 _elapsed_ms(t0),
             )
         else:
-            self.logger.info(
+            self.logger.trace(
                 "net cancel_order market=%s token=%s order_id=%s elapsed_ms=%.1f",
                 market_id,
                 token_id,
                 existing.get("order_id"),
                 _elapsed_ms(t0),
+            )
+            self._log_cancel_success(
+                market_id=market_id,
+                token_id=token_id,
+                side=side,
+                order_id=existing.get("order_id"),
+                reason=reason,
             )
         self.state["orders"].pop(key, None)
         self._log_state_remove(key, existing, reason)
@@ -757,13 +913,13 @@ class MarketMaker:
 
         if size < min_size:
             if self.log_decisions:
-                self.logger.info(
+                self.logger.trace(
                     "skip run size too small size=%s min_size=%s",
                     _fmt_float(size, 4),
                     _fmt_float(min_size, 4),
                 )
             return
-        self.logger.info(
+        self.logger.trace(
             "loop start markets=%d level=%d size=%s min_size=%s replace_bps=%s proximity_bps=%s reference=%s",
             len(self.markets),
             level,
@@ -786,7 +942,7 @@ class MarketMaker:
             token_id, _side_label, symbol_types = self._select_token(market)
             if not token_id:
                 if self.log_decisions:
-                    self.logger.info("skip market=%s reason=missing_token_id", market_id)
+                    self.logger.trace("skip market=%s reason=missing_token_id", market_id)
                 continue
 
             if do_sync and sync_orders is not None:
@@ -808,7 +964,7 @@ class MarketMaker:
                     question_id = market.get("questionId")
                     if not question_id:
                         if self.log_decisions:
-                            self.logger.info("skip market=%s token=%s reason=missing_question_id", market_id, token_id)
+                            self.logger.trace("skip market=%s token=%s reason=missing_question_id", market_id, token_id)
                         continue
                     book = self.data_client.fetch_orderbook(
                         question_id=str(question_id),
@@ -828,7 +984,7 @@ class MarketMaker:
                 )
                 continue
             source = "frontend" if isinstance(self.data_client, OpinionFrontendClient) else "openapi"
-            self.logger.info(
+            self.logger.trace(
                 "net fetch_orderbook market=%s token=%s source=%s elapsed_ms=%.1f",
                 market_id,
                 token_id,
@@ -845,7 +1001,7 @@ class MarketMaker:
 
             ref_price = _reference_price(reference, best_bid, best_ask)
             if self.log_orderbook:
-                self.logger.info(
+                self.logger.trace(
                     "book market=%s token=%s best_bid=%s best_ask=%s desired_bid=%s desired_ask=%s bid_depth=%s ask_depth=%s ref_price=%s",
                     market_id,
                     token_id,
@@ -882,7 +1038,7 @@ class MarketMaker:
                 side_ref_price = _mapped_reference_price(side, ref_price)
                 if cancel_on_proximity and should_cancel_on_proximity(existing_price, side_ref_price, proximity_bps):
                     if self.log_decisions:
-                        self.logger.info(
+                        self.logger.trace(
                             "cancel proximity market=%s token=%s side=%s order_id=%s existing_price=%s ref_price=%s proximity_bps=%s",
                             market_id,
                             token_id,
@@ -892,11 +1048,20 @@ class MarketMaker:
                             _fmt_float(side_ref_price),
                             proximity_bps,
                         )
+                    self._log_risk_cancel(
+                        market_id=market_id,
+                        token_id=token_id,
+                        side=side,
+                        order_id=existing.get("order_id"),
+                        order_price=existing_price,
+                        reference_price=side_ref_price,
+                        proximity_bps=proximity_bps,
+                    )
                     self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="proximity")
                     continue
                 if target_side is not None and side != target_side:
                     if self.log_decisions:
-                        self.logger.info(
+                        self.logger.trace(
                             "cancel depth_reversal market=%s token=%s side=%s order_id=%s target_side=%s",
                             market_id,
                             token_id,
@@ -913,7 +1078,7 @@ class MarketMaker:
                     remaining_sides.append(side)
             if remaining_sides:
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "skip market=%s token=%s reason=existing_order sides=%s",
                         market_id,
                         token_id,
@@ -923,7 +1088,7 @@ class MarketMaker:
 
             if desired_bid is None or desired_ask is None:
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "skip market=%s token=%s reason=missing_desired_price best_bid=%s best_ask=%s",
                         market_id,
                         token_id,
@@ -933,7 +1098,7 @@ class MarketMaker:
                 continue
             if desired_bid <= 0 or desired_ask <= 0 or desired_bid >= desired_ask:
                 if self.log_decisions:
-                    self.logger.info(
+                    self.logger.trace(
                         "skip market=%s token=%s reason=invalid_spread desired_bid=%s desired_ask=%s",
                         market_id,
                         token_id,
@@ -943,12 +1108,12 @@ class MarketMaker:
                 continue
             if bid_depth is None and ask_depth is None:
                 if self.log_decisions:
-                    self.logger.info("skip market=%s token=%s reason=missing_depth", market_id, token_id)
+                    self.logger.trace("skip market=%s token=%s reason=missing_depth", market_id, token_id)
                 continue
 
             if target_side == "buy":
                 if self.log_decisions:
-                    self.logger.info("decision market=%s token=%s action=place_buy", market_id, token_id)
+                    self.logger.trace("decision market=%s token=%s action=place_buy", market_id, token_id)
                 self._update_order(
                     market_id=market_id,
                     token_id=token_id,
@@ -967,7 +1132,7 @@ class MarketMaker:
                 mapped_ref_price = _complement_price(ref_price)
                 if not no_token_id:
                     if self.log_decisions:
-                        self.logger.info(
+                        self.logger.trace(
                             "skip market=%s token=%s reason=missing_no_token_id",
                             market_id,
                             token_id,
@@ -975,7 +1140,7 @@ class MarketMaker:
                     continue
                 if mapped_price is None or mapped_price <= 0:
                     if self.log_decisions:
-                        self.logger.info(
+                        self.logger.trace(
                             "skip market=%s token=%s reason=invalid_no_price yes_ask=%s no_price=%s",
                             market_id,
                             token_id,
@@ -984,8 +1149,8 @@ class MarketMaker:
                         )
                     continue
                 if self.log_decisions:
-                    self.logger.info("decision market=%s token=%s action=place_sell", market_id, token_id)
-                    self.logger.info(
+                    self.logger.trace("decision market=%s token=%s action=place_sell", market_id, token_id)
+                    self.logger.trace(
                         "sell mapped to buy_no market=%s token_yes=%s token_no=%s yes_ask=%s no_price=%s",
                         market_id,
                         token_id,
@@ -1008,14 +1173,14 @@ class MarketMaker:
                 )
             else:
                 if self.log_decisions:
-                    self.logger.info("skip market=%s token=%s reason=missing_target_side", market_id, token_id)
+                    self.logger.trace("skip market=%s token=%s reason=missing_target_side", market_id, token_id)
 
         if do_sync and sync_success:
             self._apply_order_sync_backoff(sync_changed)
 
         save_state(self.state_path, self.state)
         if self.log_state_changes:
-            self.logger.info(
+            self.logger.trace(
                 "state saved path=%s orders=%d",
                 self.state_path,
                 len(self.state.get("orders", {})),
