@@ -131,6 +131,7 @@ def _request_json(
     params: Optional[Dict[str, Any]] = None,
     timeout=DEFAULT_TIMEOUT,
     tries: int = DEFAULT_HTTP_RETRIES,
+    raw_out: Optional[Dict[str, Any]] = None,
 ) -> Any:
     resp = _request_with_retry(
         method,
@@ -141,6 +142,17 @@ def _request_json(
         timeout=timeout,
         tries=tries,
     )
+    if raw_out is not None:
+        raw_out["status"] = resp.status_code
+        raw_out["url"] = str(resp.url)
+        try:
+            raw_out["headers"] = dict(resp.headers)
+        except Exception:
+            raw_out["headers"] = None
+        try:
+            raw_out["text"] = resp.text
+        except Exception:
+            raw_out["text"] = None
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
     return resp.json()
@@ -418,6 +430,7 @@ def fetch_market_depth(
     device_fingerprint: Optional[str] = None,
     waf_token: Optional[str] = None,
     user_agent: Optional[str] = None,
+    raw_out: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     params = {
         "symbol_types": symbol_types,
@@ -439,6 +452,7 @@ def fetch_market_depth(
         params=params,
         headers=headers,
         timeout=DEFAULT_TIMEOUT,
+        raw_out=raw_out,
     )
 
 

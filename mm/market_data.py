@@ -7,6 +7,8 @@ import requests
 
 from opinion_frontend_fetch import fetch_market_depth
 
+from .raw_dump import RawNetDumper
+
 
 class RateLimiter:
     def __init__(self, min_interval: float) -> None:
@@ -58,12 +60,20 @@ def _normalize_auth_tokens(raw: str) -> List[str]:
 
 
 class OpinionOpenApiClient:
-    def __init__(self, host: str, api_key: str, min_interval: float, timeout: float) -> None:
+    def __init__(
+        self,
+        host: str,
+        api_key: str,
+        min_interval: float,
+        timeout: float,
+        raw_dumper: Optional[RawNetDumper] = None,
+    ) -> None:
         self.host = host.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self.limiter = RateLimiter(min_interval)
         self.session = requests.Session()
+        self.raw_dumper = raw_dumper
 
     def fetch_orderbook(self, token_id: str) -> Dict[str, Any]:
         if not self.api_key:
@@ -72,9 +82,15 @@ class OpinionOpenApiClient:
         url = f"{self.host}/token/orderbook"
         headers = {"apikey": self.api_key, "Accept": "application/json"}
         resp = self.session.get(url, headers=headers, params={"token_id": token_id}, timeout=self.timeout)
+        raw_text = resp.text if self.raw_dumper else None
+        meta = {"token_id": token_id, "status": resp.status_code, "url": url}
         if resp.status_code != 200:
+            if self.raw_dumper:
+                self.raw_dumper.dump("openapi_orderbook", meta=meta, raw_text=raw_text)
             raise RuntimeError(f"Opinion openapi orderbook HTTP {resp.status_code}: {resp.text[:200]}")
         data = resp.json()
+        if self.raw_dumper:
+            self.raw_dumper.dump("openapi_orderbook", meta=meta, raw_text=raw_text, payload=data)
         if isinstance(data, dict) and data.get("errno") not in (0, None):
             raise RuntimeError(f"Opinion openapi orderbook errno={data.get('errno')}: {data}")
         return _normalize_book(data)
@@ -87,6 +103,7 @@ class OpinionFrontendClient:
         device_fingerprint: str,
         waf_token: str = "",
         auth_mode: str = "random",
+        raw_dumper: Optional[RawNetDumper] = None,
     ) -> None:
         self.auth_tokens = _normalize_auth_tokens(auth_token)
         self.device_fingerprints = _split_csv(device_fingerprint)
@@ -95,6 +112,7 @@ class OpinionFrontendClient:
         self._rr_index = 0
         self._warned_fp_mismatch = False
         self._lock = threading.Lock()
+        self.raw_dumper = raw_dumper
 
     def fetch_orderbook(
         self,
@@ -104,14 +122,46 @@ class OpinionFrontendClient:
         worker_idx: Optional[int] = None,
     ) -> Dict[str, Any]:
         auth_token, device_fingerprint = self._pick_auth(worker_idx)
-        data = fetch_market_depth(
-            question_id=question_id,
-            symbol=symbol,
-            symbol_types=symbol_types,
-            auth_token=auth_token,
-            device_fingerprint=device_fingerprint,
-            waf_token=self.waf_token,
-        )
+        raw_out: Optional[Dict[str, Any]] = {} if self.raw_dumper else None
+        try:
+            data = fetch_market_depth(
+                question_id=question_id,
+                symbol=symbol,
+                symbol_types=symbol_types,
+                auth_token=auth_token,
+                device_fingerprint=device_fingerprint,
+                waf_token=self.waf_token,
+                raw_out=raw_out,
+            )
+        except Exception:
+            if self.raw_dumper:
+                meta = {
+                    "question_id": question_id,
+                    "symbol": symbol,
+                    "symbol_types": symbol_types,
+                    "status": (raw_out or {}).get("status"),
+                    "url": (raw_out or {}).get("url"),
+                }
+                self.raw_dumper.dump(
+                    "frontend_orderbook",
+                    meta=meta,
+                    raw_text=(raw_out or {}).get("text"),
+                )
+            raise
+        if self.raw_dumper:
+            meta = {
+                "question_id": question_id,
+                "symbol": symbol,
+                "symbol_types": symbol_types,
+                "status": (raw_out or {}).get("status"),
+                "url": (raw_out or {}).get("url"),
+            }
+            self.raw_dumper.dump(
+                "frontend_orderbook",
+                meta=meta,
+                raw_text=(raw_out or {}).get("text"),
+                payload=data,
+            )
         return _normalize_book(data)
 
     def update_auth(self, auth_token: str, device_fingerprint: str) -> None:

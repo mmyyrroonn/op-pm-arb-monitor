@@ -55,7 +55,12 @@
     "log_orderbook": true,
     "log_state_changes": true,
     "log_order_params": true,
-    "log_decisions": true
+    "log_decisions": true,
+    "raw_net": {
+      "enabled": true,
+      "dir": "net_raw",
+      "max_chars": 200000
+    }
   },
   "opinion": {
     "host": "https://proxy.opinion.trade:8443",

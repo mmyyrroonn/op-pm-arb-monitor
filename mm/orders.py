@@ -6,6 +6,8 @@ from opinion_clob_sdk.chain.py_order_utils.model.order import PlaceOrderDataInpu
 from opinion_clob_sdk.chain.py_order_utils.model.order_type import LIMIT_ORDER
 from opinion_clob_sdk.chain.py_order_utils.model.sides import BUY, SELL, OrderSide
 
+from .raw_dump import RawNetDumper
+
 
 class OpinionOrderExecutor:
     def __init__(
@@ -17,6 +19,7 @@ class OpinionOrderExecutor:
         rpc_url: str,
         private_key: str,
         multi_sig_addr: str,
+        raw_dumper: Optional[RawNetDumper] = None,
     ) -> None:
         chain_id = chain_id or CHAIN_ID_BNB_MAINNET
         self.client = Client(
@@ -27,6 +30,7 @@ class OpinionOrderExecutor:
             private_key=private_key,
             multi_sig_addr=multi_sig_addr,
         )
+        self.raw_dumper = raw_dumper
 
     def place_limit_order(
         self,
@@ -48,16 +52,31 @@ class OpinionOrderExecutor:
             orderType=LIMIT_ORDER,
         )
         result = self.client.place_order(payload, check_approval=False)
+        self._dump_raw(
+            "place_order",
+            meta={
+                "market_id": market_id,
+                "token_id": token_id,
+                "side": str(side),
+                "price": str(price),
+                "size": size,
+            },
+            payload=result,
+        )
         order_id = _extract_order_id(result)
         if order_id is None:
             raise RuntimeError(f"place_order missing order_id result={_summarize_result(result)}")
         return order_id
 
     def cancel_order(self, order_id: str) -> Any:
-        return self.client.cancel_order(order_id)
+        result = self.client.cancel_order(order_id)
+        self._dump_raw("cancel_order", meta={"order_id": order_id}, payload=result)
+        return result
 
     def cancel_all_orders(self) -> Dict[str, Any]:
-        return self.client.cancel_all_orders()
+        result = self.client.cancel_all_orders()
+        self._dump_raw("cancel_all_orders", payload=result)
+        return result
 
     def fetch_open_orders(
         self,
@@ -78,6 +97,16 @@ class OpinionOrderExecutor:
                 limit=limit,
                 page=page,
             )
+            self._dump_raw(
+                "fetch_open_orders",
+                meta={
+                    "market_id": market_id,
+                    "status": status,
+                    "limit": limit,
+                    "page": page,
+                },
+                payload=result,
+            )
             orders = self.client._parse_list_response(result, f"get open orders page {page}")
             if not orders:
                 break
@@ -86,6 +115,17 @@ class OpinionOrderExecutor:
                 break
             page += 1
         return all_orders
+
+    def _dump_raw(
+        self,
+        kind: str,
+        *,
+        meta: Optional[Dict[str, Any]] = None,
+        payload: Any = None,
+    ) -> None:
+        if not self.raw_dumper:
+            return
+        self.raw_dumper.dump(kind, meta=meta, payload=payload)
 
 
 def _extract_order_id(result: Any) -> Optional[str]:

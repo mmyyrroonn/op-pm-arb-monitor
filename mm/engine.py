@@ -11,6 +11,7 @@ from .market_data import OpinionFrontendClient, OpinionOpenApiClient
 from .market_selector import select_and_write
 from .orders import OpinionOrderExecutor, normalize_order
 from .quote import best_bid_ask, format_price, notional_depth_at_levels, price_at_level, price_diff_bps
+from .raw_dump import RawNetDumper
 from .risk import should_cancel_on_proximity
 from .state import load_state, save_state
 
@@ -144,6 +145,16 @@ class MarketMaker:
         self.log_decisions = bool(log_cfg.get("log_decisions", True))
         self.loop_count = 0
 
+        raw_cfg = log_cfg.get("raw_net", {})
+        if not isinstance(raw_cfg, dict):
+            raw_cfg = {}
+        raw_enabled = bool(raw_cfg.get("enabled", log_cfg.get("raw_net_enabled", False)))
+        raw_dir = str(raw_cfg.get("dir", log_cfg.get("raw_net_dir", "net_raw")))
+        raw_max_chars = int(raw_cfg.get("max_chars", log_cfg.get("raw_net_max_chars", 200000)))
+        self.raw_dumper = RawNetDumper(enabled=raw_enabled, directory=raw_dir, max_chars=raw_max_chars)
+        if raw_enabled:
+            self.logger.info("raw net dump enabled dir=%s", raw_dir)
+
         self.state_path = (config.get("state") or {}).get("file", "mm_state.json")
         self.state = load_state(self.state_path)
         self.logger.info(
@@ -196,6 +207,7 @@ class MarketMaker:
             rpc_url=rpc_url,
             private_key=private_key,
             multi_sig_addr=multi_sig_addr,
+            raw_dumper=self.raw_dumper,
         )
 
         data_cfg = config.get("opinion_data", {})
@@ -205,7 +217,13 @@ class MarketMaker:
             device_fp = resolve_secret(data_cfg, "frontend_device_fp", data_cfg.get("frontend_device_fp_env", ""))
             waf = resolve_secret(data_cfg, "frontend_waf", data_cfg.get("frontend_waf_env", ""))
             auth_mode = str(data_cfg.get("frontend_auth_mode", "random"))
-            self.data_client = OpinionFrontendClient(auth, device_fp, waf, auth_mode=auth_mode)
+            self.data_client = OpinionFrontendClient(
+                auth,
+                device_fp,
+                waf,
+                auth_mode=auth_mode,
+                raw_dumper=self.raw_dumper,
+            )
             refresh_cfg = data_cfg.get("frontend_auth_refresh", {})
             if bool(refresh_cfg.get("enabled", False)):
                 try:
@@ -247,6 +265,7 @@ class MarketMaker:
                 api_key,
                 min_interval,
                 timeout,
+                raw_dumper=self.raw_dumper,
             )
         self.logger.info("data source=%s", source)
 
