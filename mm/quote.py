@@ -70,6 +70,26 @@ def depth_at_levels(book: Dict[str, Any], side: str, level: int) -> Optional[flo
     return total
 
 
+def notional_depth_at_levels(book: Dict[str, Any], side: str, level: int) -> Optional[float]:
+    if level <= 0:
+        return None
+    levels = _sorted_levels(book, side)
+    if not levels:
+        return None
+    total = 0.0
+    saw_size = False
+    for idx in range(min(level, len(levels))):
+        price, size = levels[idx]
+        qty = _to_float(size)
+        if qty is None:
+            continue
+        saw_size = True
+        total += price * qty
+    if not saw_size:
+        return None
+    return total
+
+
 def format_price(price: float) -> str:
     text = f"{price:.6f}".rstrip("0").rstrip(".")
     return text or "0"

@@ -10,7 +10,7 @@ from .frontend_auth import FrontendAuthRefresher
 from .market_data import OpinionFrontendClient, OpinionOpenApiClient
 from .market_selector import select_and_write
 from .orders import OpinionOrderExecutor, normalize_order
-from .quote import best_bid_ask, depth_at_levels, format_price, price_at_level, price_diff_bps
+from .quote import best_bid_ask, format_price, notional_depth_at_levels, price_at_level, price_diff_bps
 from .risk import should_cancel_on_proximity
 from .state import load_state, save_state
 
@@ -64,6 +64,7 @@ def _elapsed_ms(start: float) -> float:
 
 
 TRACE_LEVEL = 5
+PRICE_EPSILON = 1e-6
 
 
 def _ensure_trace_level() -> None:
@@ -435,6 +436,48 @@ class MarketMaker:
             _fmt_float(order_price),
             _fmt_float(reference_price),
             _fmt_float(proximity_bps, 2),
+        )
+
+    def _log_risk_cancel_depth(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        side: str,
+        order_id: Optional[str],
+        depth_notional: Optional[float],
+        min_depth_usd: float,
+    ) -> None:
+        self.logger.info(
+            "risk cancel depth market=%s token=%s side=%s order_id=%s depth=%s min_depth_usd=%s",
+            market_id,
+            token_id,
+            side,
+            order_id,
+            _fmt_float(depth_notional, 4),
+            _fmt_float(min_depth_usd, 2),
+        )
+
+    def _log_risk_cancel_level(
+        self,
+        *,
+        market_id: int,
+        token_id: str,
+        side: str,
+        order_id: Optional[str],
+        order_price: Optional[float],
+        desired_price: Optional[float],
+        level: int,
+    ) -> None:
+        self.logger.info(
+            "risk cancel level market=%s token=%s side=%s order_id=%s price=%s desired_price=%s level=%s",
+            market_id,
+            token_id,
+            side,
+            order_id,
+            _fmt_float(order_price),
+            _fmt_float(desired_price),
+            level,
         )
 
     def _snapshot_orders(self, market_id: int, token_id: str) -> Dict[str, Tuple[str, Optional[float], Optional[float]]]:
@@ -910,6 +953,7 @@ class MarketMaker:
         cancel_on_proximity = bool(risk_cfg.get("cancel_on_price_proximity", True))
         proximity_bps = float(risk_cfg.get("proximity_bps", 5.0))
         reference = str(risk_cfg.get("reference_price", "mid")).lower()
+        min_depth_usd = float(risk_cfg.get("min_depth_usd", quote_cfg.get("min_depth_usd", 2000.0)))
 
         if size < min_size:
             if self.log_decisions:
@@ -920,7 +964,7 @@ class MarketMaker:
                 )
             return
         self.logger.trace(
-            "loop start markets=%d level=%d size=%s min_size=%s replace_bps=%s proximity_bps=%s reference=%s",
+            "loop start markets=%d level=%d size=%s min_size=%s replace_bps=%s proximity_bps=%s reference=%s min_depth_usd=%s",
             len(self.markets),
             level,
             _fmt_float(size, 4),
@@ -928,6 +972,7 @@ class MarketMaker:
             _fmt_float(replace_bps, 2),
             _fmt_float(proximity_bps, 2),
             reference,
+            _fmt_float(min_depth_usd, 2),
         )
 
         sync_changed = False
@@ -996,35 +1041,30 @@ class MarketMaker:
             desired_bid = price_at_level(book, "bid", level) or best_bid
             desired_ask = price_at_level(book, "ask", level) or best_ask
 
-            bid_depth = depth_at_levels(book, "bid", level)
-            ask_depth = depth_at_levels(book, "ask", level)
+            bid_notional = notional_depth_at_levels(book, "bid", level)
+            ask_notional = notional_depth_at_levels(book, "ask", level)
 
             ref_price = _reference_price(reference, best_bid, best_ask)
+            mapped_ref_price = _complement_price(ref_price)
+            mapped_ask_price = _complement_price(desired_ask)
+
+            bid_depth_ok = bid_notional is not None and (min_depth_usd <= 0 or bid_notional >= min_depth_usd)
+            ask_depth_ok = ask_notional is not None and (min_depth_usd <= 0 or ask_notional >= min_depth_usd)
+
             if self.log_orderbook:
                 self.logger.trace(
-                    "book market=%s token=%s best_bid=%s best_ask=%s desired_bid=%s desired_ask=%s bid_depth=%s ask_depth=%s ref_price=%s",
+                    "book market=%s token=%s best_bid=%s best_ask=%s desired_bid=%s desired_ask=%s bid_notional=%s ask_notional=%s min_depth_usd=%s ref_price=%s",
                     market_id,
                     token_id,
                     _fmt_float(best_bid),
                     _fmt_float(best_ask),
                     _fmt_float(desired_bid),
                     _fmt_float(desired_ask),
-                    _fmt_float(bid_depth, 4),
-                    _fmt_float(ask_depth, 4),
+                    _fmt_float(bid_notional, 4),
+                    _fmt_float(ask_notional, 4),
+                    _fmt_float(min_depth_usd, 2),
                     _fmt_float(ref_price),
                 )
-
-            target_side = None
-            if ask_depth is None and bid_depth is None:
-                target_side = None
-            elif ask_depth is None:
-                target_side = "buy"
-            elif bid_depth is None:
-                target_side = "sell"
-            elif bid_depth >= ask_depth:
-                target_side = "buy"
-            else:
-                target_side = "sell"
 
             existing_orders: Dict[str, Dict[str, Any]] = {}
             for side in ("buy", "sell"):
@@ -1059,34 +1099,66 @@ class MarketMaker:
                     )
                     self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="proximity")
                     continue
-                if target_side is not None and side != target_side:
+                depth_ok = bid_depth_ok if side == "buy" else ask_depth_ok
+                depth_val = bid_notional if side == "buy" else ask_notional
+                if not depth_ok:
                     if self.log_decisions:
                         self.logger.trace(
-                            "cancel depth_reversal market=%s token=%s side=%s order_id=%s target_side=%s",
+                            "cancel depth_threshold market=%s token=%s side=%s order_id=%s depth=%s min_depth_usd=%s",
                             market_id,
                             token_id,
                             side,
                             existing.get("order_id"),
-                            target_side,
+                            _fmt_float(depth_val, 4),
+                            _fmt_float(min_depth_usd, 2),
                         )
-                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="depth_reversal")
-
-            remaining_sides = []
-            for side in ("buy", "sell"):
-                key = _order_key(market_id, token_id, side)
-                if self.state.get("orders", {}).get(key):
-                    remaining_sides.append(side)
-            if remaining_sides:
-                if self.log_decisions:
-                    self.logger.trace(
-                        "skip market=%s token=%s reason=existing_order sides=%s",
-                        market_id,
-                        token_id,
-                        ",".join(remaining_sides),
+                    self._log_risk_cancel_depth(
+                        market_id=market_id,
+                        token_id=token_id,
+                        side=side,
+                        order_id=existing.get("order_id"),
+                        depth_notional=depth_val,
+                        min_depth_usd=min_depth_usd,
                     )
-                continue
+                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="depth_threshold")
+                    continue
+                desired_price = desired_bid if side == "buy" else mapped_ask_price
+                if desired_price is not None and abs(existing_price - desired_price) > PRICE_EPSILON:
+                    if self.log_decisions:
+                        self.logger.trace(
+                            "cancel price_level market=%s token=%s side=%s order_id=%s existing_price=%s desired_price=%s level=%s",
+                            market_id,
+                            token_id,
+                            side,
+                            existing.get("order_id"),
+                            _fmt_float(existing_price),
+                            _fmt_float(desired_price),
+                            level,
+                        )
+                    self._log_risk_cancel_level(
+                        market_id=market_id,
+                        token_id=token_id,
+                        side=side,
+                        order_id=existing.get("order_id"),
+                        order_price=existing_price,
+                        desired_price=desired_price,
+                        level=level,
+                    )
+                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="price_level")
 
-            if desired_bid is None or desired_ask is None:
+            spread_valid = True
+            if desired_bid is not None and desired_ask is not None:
+                if desired_bid <= 0 or desired_ask <= 0 or desired_bid >= desired_ask:
+                    spread_valid = False
+                    if self.log_decisions:
+                        self.logger.trace(
+                            "skip market=%s token=%s reason=invalid_spread desired_bid=%s desired_ask=%s",
+                            market_id,
+                            token_id,
+                            _fmt_float(desired_bid),
+                            _fmt_float(desired_ask),
+                        )
+            if desired_bid is None and desired_ask is None:
                 if self.log_decisions:
                     self.logger.trace(
                         "skip market=%s token=%s reason=missing_desired_price best_bid=%s best_ask=%s",
@@ -1095,23 +1167,8 @@ class MarketMaker:
                         _fmt_float(best_bid),
                         _fmt_float(best_ask),
                     )
-                continue
-            if desired_bid <= 0 or desired_ask <= 0 or desired_bid >= desired_ask:
-                if self.log_decisions:
-                    self.logger.trace(
-                        "skip market=%s token=%s reason=invalid_spread desired_bid=%s desired_ask=%s",
-                        market_id,
-                        token_id,
-                        _fmt_float(desired_bid),
-                        _fmt_float(desired_ask),
-                    )
-                continue
-            if bid_depth is None and ask_depth is None:
-                if self.log_decisions:
-                    self.logger.trace("skip market=%s token=%s reason=missing_depth", market_id, token_id)
-                continue
 
-            if target_side == "buy":
+            if desired_bid is not None and desired_bid > 0 and spread_valid and bid_depth_ok:
                 if self.log_decisions:
                     self.logger.trace("decision market=%s token=%s action=place_buy", market_id, token_id)
                 self._update_order(
@@ -1125,11 +1182,20 @@ class MarketMaker:
                     proximity_bps=proximity_bps,
                     cancel_on_proximity=cancel_on_proximity,
                 )
-            elif target_side == "sell":
-                no_token_raw = market.get("no_token_id")
-                no_token_id = str(no_token_raw) if no_token_raw is not None else ""
-                mapped_price = _complement_price(desired_ask)
-                mapped_ref_price = _complement_price(ref_price)
+            elif desired_bid is not None and desired_bid > 0 and spread_valid and not bid_depth_ok:
+                if self.log_decisions:
+                    self.logger.trace(
+                        "skip market=%s token=%s reason=depth_threshold side=buy depth=%s min_depth_usd=%s",
+                        market_id,
+                        token_id,
+                        _fmt_float(bid_notional, 4),
+                        _fmt_float(min_depth_usd, 2),
+                    )
+
+            no_token_raw = market.get("no_token_id")
+            no_token_id = str(no_token_raw) if no_token_raw is not None else ""
+            if desired_ask is not None and desired_ask > 0 and spread_valid and ask_depth_ok:
+                mapped_price = mapped_ask_price
                 if not no_token_id:
                     if self.log_decisions:
                         self.logger.trace(
@@ -1137,8 +1203,7 @@ class MarketMaker:
                             market_id,
                             token_id,
                         )
-                    continue
-                if mapped_price is None or mapped_price <= 0:
+                elif mapped_price is None or mapped_price <= 0:
                     if self.log_decisions:
                         self.logger.trace(
                             "skip market=%s token=%s reason=invalid_no_price yes_ask=%s no_price=%s",
@@ -1147,33 +1212,39 @@ class MarketMaker:
                             _fmt_float(desired_ask),
                             _fmt_float(mapped_price),
                         )
-                    continue
+                else:
+                    if self.log_decisions:
+                        self.logger.trace("decision market=%s token=%s action=place_sell", market_id, token_id)
+                        self.logger.trace(
+                            "sell mapped to buy_no market=%s token_yes=%s token_no=%s yes_ask=%s no_price=%s",
+                            market_id,
+                            token_id,
+                            no_token_id,
+                            _fmt_float(desired_ask),
+                            _fmt_float(mapped_price),
+                        )
+                    self._update_order(
+                        market_id=market_id,
+                        token_id=token_id,
+                        side="sell",
+                        desired_price=mapped_price,
+                        size=size,
+                        reference_price=mapped_ref_price,
+                        replace_bps=replace_bps,
+                        proximity_bps=proximity_bps,
+                        cancel_on_proximity=cancel_on_proximity,
+                        order_token_id=no_token_id,
+                        order_side="buy",
+                    )
+            elif desired_ask is not None and desired_ask > 0 and spread_valid and not ask_depth_ok:
                 if self.log_decisions:
-                    self.logger.trace("decision market=%s token=%s action=place_sell", market_id, token_id)
                     self.logger.trace(
-                        "sell mapped to buy_no market=%s token_yes=%s token_no=%s yes_ask=%s no_price=%s",
+                        "skip market=%s token=%s reason=depth_threshold side=sell depth=%s min_depth_usd=%s",
                         market_id,
                         token_id,
-                        no_token_id,
-                        _fmt_float(desired_ask),
-                        _fmt_float(mapped_price),
+                        _fmt_float(ask_notional, 4),
+                        _fmt_float(min_depth_usd, 2),
                     )
-                self._update_order(
-                    market_id=market_id,
-                    token_id=token_id,
-                    side="sell",
-                    desired_price=mapped_price,
-                    size=size,
-                    reference_price=mapped_ref_price,
-                    replace_bps=replace_bps,
-                    proximity_bps=proximity_bps,
-                    cancel_on_proximity=cancel_on_proximity,
-                    order_token_id=no_token_id,
-                    order_side="buy",
-                )
-            else:
-                if self.log_decisions:
-                    self.logger.trace("skip market=%s token=%s reason=missing_target_side", market_id, token_id)
 
         if do_sync and sync_success:
             self._apply_order_sync_backoff(sync_changed)

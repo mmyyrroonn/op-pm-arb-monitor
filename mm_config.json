@@ -23,6 +23,7 @@
     "token_side": "yes",
     "size_per_side": 1,
     "min_size": 1,
+    "min_depth_usd": 2000,
     "replace_bps": 5.0
   },
   "risk": {
