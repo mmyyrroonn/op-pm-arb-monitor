@@ -270,6 +270,9 @@ def _normalize_orders(orders: List[Any]) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for order in orders:
         market_title = _get_field(order, ["marketTitle", "market_title", "rootMarketTitle", "root_market_title"])
+        status_enum = _get_field(order, ["statusEnum", "status_enum"])
+        status_raw = _get_field(order, ["status"])
+        status_code = _status_code_from_text(status_raw) or _status_code_from_text(status_enum)
         normalized.append(
             {
                 "order_id": _get_field(order, ["orderId", "order_id"]),
@@ -282,9 +285,8 @@ def _normalize_orders(orders: List[Any]) -> List[Dict[str, Any]]:
                 "price": _get_field(order, ["price"]),
                 "order_shares": _get_field(order, ["orderShares", "order_shares"]),
                 "filled_shares": _get_field(order, ["filledShares", "filled_shares"]),
-                "status": _get_field(order, ["statusEnum", "status_enum"]) or str(
-                    _get_field(order, ["status"]) or ""
-                ),
+                "status": status_enum or str(status_raw or ""),
+                "status_code": status_code,
                 "created_at": _get_field(order, ["createdAt", "created_at"]),
             }
         )
@@ -410,6 +412,7 @@ class AccountApp(App):
         ("q", "quit", "Quit"),
         ("r", "reload", "Reload"),
         ("o", "view_orders", "Orders"),
+        ("n", "view_pending", "Pending"),
         ("p", "view_positions", "Positions"),
         ("b", "view_balances", "Balances"),
         ("m", "view_markets", "Markets"),
@@ -499,6 +502,10 @@ class AccountApp(App):
         self.view = "orders"
         self._render()
 
+    def action_view_pending(self) -> None:
+        self.view = "pending"
+        self._render()
+
     def action_view_positions(self) -> None:
         self.view = "positions"
         self._render()
@@ -519,9 +526,10 @@ class AccountApp(App):
 
         ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.last_refresh or time.time()))
         status_label = self.orders_status if self.orders_status else "all"
+        pending_count = sum(1 for row in self.orders if _is_pending_order(row))
         header_lines = [
             f"Opinion Account Monitor  {ts}",
-            f"view={self.view} orders={len(self.orders)} positions={len(self.positions)} "
+            f"view={self.view} orders={len(self.orders)} pending={pending_count} positions={len(self.positions)} "
             f"balances={len(self.balances)} markets={len(self.markets)}",
             f"orders_status={status_label} orders_pages={self.orders_max_pages} "
             f"positions_pages={self.positions_max_pages} refresh={self.refresh}s",
@@ -533,7 +541,7 @@ class AccountApp(App):
         else:
             errors.update("")
 
-        footer.update("o/p/b/m:view  r:reload  q:quit")
+        footer.update("o/n/p/b/m:view  r:reload  q:quit")
 
         self._render_table(table)
 
@@ -622,6 +630,11 @@ class AccountApp(App):
                 )
             return
 
+        if self.view == "pending":
+            rows = [row for row in self.orders if _is_pending_order(row)]
+        else:
+            rows = self.orders
+
         self._reset_table(
             table,
             [
@@ -636,7 +649,7 @@ class AccountApp(App):
                 ("Order ID", 14),
             ],
         )
-        for row in self.orders:
+        for row in rows:
             title = _truncate(row.get("market_title") or "", 36)
             order_id = _truncate(row.get("order_id") or "", 14)
             table.add_row(
@@ -661,12 +674,48 @@ def _normalize_status_arg(status: str) -> str:
     return status.strip()
 
 
+def _status_code_from_text(text: Any) -> Optional[int]:
+    if text is None:
+        return None
+    if isinstance(text, int):
+        return text
+    raw = str(text).strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    lowered = raw.lower()
+    mapping = {
+        "pending": 1,
+        "finished": 2,
+        "canceled": 3,
+        "cancelled": 3,
+        "expired": 4,
+        "failed": 5,
+    }
+    for key, code in mapping.items():
+        if lowered.startswith(key):
+            return code
+    return None
+
+
+def _is_pending_order(order: Dict[str, Any]) -> bool:
+    code = _to_int(order.get("status_code"))
+    if code is not None:
+        return code == 1
+    status_text = order.get("status")
+    code = _status_code_from_text(status_text)
+    if code is not None:
+        return code == 1
+    return False
+
+
 def main() -> int:
     load_dotenv()
     ap = argparse.ArgumentParser(description="Opinion account monitor (Textual TUI).")
     ap.add_argument("--config", default="mm_config.json", help="Config JSON path.")
     ap.add_argument("--refresh", type=float, default=5.0, help="Refresh interval seconds.")
-    ap.add_argument("--view", default="orders", help="Initial view: orders|positions|balances|markets.")
+    ap.add_argument("--view", default="orders", help="Initial view: orders|pending|positions|balances|markets.")
     ap.add_argument("--orders-status", default="all", help="Order status filter (use 'all' for no filter).")
     ap.add_argument("--orders-limit", type=int, default=0, help="Orders page size (0=from config).")
     ap.add_argument("--orders-max-pages", type=int, default=0, help="Orders max pages (0=from config).")
@@ -683,7 +732,7 @@ def main() -> int:
     positions_limit = int(args.positions_limit or order_sync_cfg.get("limit", 20))
     positions_max_pages = int(args.positions_max_pages or order_sync_cfg.get("max_pages", 3))
     view = args.view.strip().lower()
-    if view not in ("orders", "positions", "balances", "markets"):
+    if view not in ("orders", "pending", "positions", "balances", "markets"):
         view = "orders"
 
     app = AccountApp(
