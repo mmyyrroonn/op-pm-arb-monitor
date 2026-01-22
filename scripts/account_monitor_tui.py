@@ -432,7 +432,8 @@ class AccountApp(App):
     ) -> None:
         super().__init__()
         self.client = client
-        self.refresh = refresh
+        # Avoid clobbering App.refresh() method.
+        self.refresh_interval = refresh
         self.view = view
         self.orders_status = orders_status
         self.orders_limit = orders_limit
@@ -461,8 +462,8 @@ class AccountApp(App):
         except TypeError:
             table.clear()
         self.action_reload()
-        if self.refresh > 0:
-            self.set_interval(self.refresh, self.action_reload)
+        if self.refresh_interval > 0:
+            self.set_interval(self.refresh_interval, self.action_reload)
 
     def action_reload(self) -> None:
         if self._loading:
@@ -532,7 +533,7 @@ class AccountApp(App):
             f"view={self.view} orders={len(self.orders)} pending={pending_count} positions={len(self.positions)} "
             f"balances={len(self.balances)} markets={len(self.markets)}",
             f"orders_status={status_label} orders_pages={self.orders_max_pages} "
-            f"positions_pages={self.positions_max_pages} refresh={self.refresh}s",
+            f"positions_pages={self.positions_max_pages} refresh={self.refresh_interval}s",
         ]
         header.update("\n".join(header_lines))
 
