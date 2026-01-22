@@ -470,7 +470,7 @@ class MarketMaker:
         level: int,
     ) -> None:
         self.logger.info(
-            "risk cancel level market=%s token=%s side=%s order_id=%s price=%s desired_price=%s level=%s",
+            "risk cancel orderbook_level market=%s token=%s side=%s order_id=%s price=%s desired_price=%s level=%s",
             market_id,
             token_id,
             side,
@@ -1126,7 +1126,7 @@ class MarketMaker:
                 if desired_price is not None and abs(existing_price - desired_price) > PRICE_EPSILON:
                     if self.log_decisions:
                         self.logger.trace(
-                            "cancel price_level market=%s token=%s side=%s order_id=%s existing_price=%s desired_price=%s level=%s",
+                            "cancel orderbook_level market=%s token=%s side=%s order_id=%s existing_price=%s desired_price=%s level=%s",
                             market_id,
                             token_id,
                             side,
@@ -1144,7 +1144,7 @@ class MarketMaker:
                         desired_price=desired_price,
                         level=level,
                     )
-                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="price_level")
+                    self._cancel_order(market_id=market_id, token_id=token_id, side=side, reason="orderbook_level")
 
             spread_valid = True
             if desired_bid is not None and desired_ask is not None:
